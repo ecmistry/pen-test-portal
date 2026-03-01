@@ -60,7 +60,7 @@ export default function Home() {
       <section className="relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-transparent pointer-events-none" />
         <div className="absolute top-20 right-20 w-96 h-96 bg-primary/5 rounded-full blur-3xl pointer-events-none" />
-        <div className="container py-20 lg:py-28">
+        <div className="container pt-4 pb-20 lg:pt-6 lg:pb-28">
           <div className="max-w-3xl mx-auto space-y-8 text-center">
             <div className="flex flex-col gap-6 items-center">
               <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="h-40 w-auto object-contain sm:h-64 md:h-80 lg:h-[28rem] xl:h-[32rem]" />
