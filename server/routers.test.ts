@@ -310,3 +310,28 @@ describe("admin", () => {
     expect(result).toBeDefined();
   });
 });
+
+describe("reports.getDemoReport (public)", () => {
+  it("returns markdown, title, and json without auth", async () => {
+    const ctx = createContext(null);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.reports.getDemoReport();
+    expect(result.title).toBeDefined();
+    expect(result.title).toContain("Demo");
+    expect(result.markdown).toBeDefined();
+    expect(result.markdown).toContain("Penetration Test Report");
+    expect(result.json).toBeDefined();
+    expect((result.json as any).summary?.securityScore).toBe(78);
+  });
+});
+
+describe("reports.getDemoReportPdf (public)", () => {
+  it("returns pdfBase64 and title without auth", async () => {
+    const ctx = createContext(null);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.reports.getDemoReportPdf();
+    expect(result.title).toBeDefined();
+    expect(result.pdfBase64).toBeDefined();
+    expect(Buffer.from(result.pdfBase64, "base64").subarray(0, 5).toString("ascii")).toBe("%PDF-");
+  });
+});

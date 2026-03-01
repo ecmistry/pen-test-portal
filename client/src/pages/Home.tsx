@@ -60,21 +60,25 @@ export default function Home() {
       <section className="relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-transparent pointer-events-none" />
         <div className="absolute top-20 right-20 w-96 h-96 bg-primary/5 rounded-full blur-3xl pointer-events-none" />
-        <div className="container py-24 lg:py-32">
-          <div className="max-w-3xl">
-            <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="h-32 w-auto object-contain mb-8" />
-            <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/20 text-primary text-sm font-medium mb-8">
-              <Zap className="w-3.5 h-3.5" />
-              Automated Weekly Penetration Testing
+        <div className="container py-20 lg:py-28">
+          <div className="max-w-3xl mx-auto space-y-8 text-center">
+            <div className="flex flex-col gap-6 items-center">
+              <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="h-40 w-auto object-contain sm:h-64 md:h-80 lg:h-[28rem] xl:h-[32rem]" />
+              <div className="space-y-4 flex flex-col items-center">
+                <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/20 text-primary text-sm font-medium w-fit">
+                  <Zap className="w-3.5 h-3.5 shrink-0" />
+                  Automated Weekly Penetration Testing
+                </div>
+                <h1 className="text-4xl font-bold tracking-tight text-foreground leading-tight lg:text-5xl">
+                  Continuous Security Testing{" "}
+                  <span className="text-primary">for Modern Applications</span>
+                </h1>
+              </div>
             </div>
-            <h1 className="text-4xl lg:text-6xl font-bold tracking-tight text-foreground mb-6 leading-tight">
-              Continuous Security Testing{" "}
-              <span className="text-primary">for Modern Applications</span>
-            </h1>
-            <p className="text-lg text-muted-foreground mb-10 leading-relaxed max-w-2xl">
+            <p className="text-lg text-muted-foreground leading-relaxed max-w-2xl mx-auto">
               Move beyond annual pen tests. Schedule automated security assessments that run weekly, detect new vulnerabilities as your application evolves, and generate compliance-ready reports aligned with OWASP Top 10, PTES, and NIST standards.
             </p>
-            <div className="flex flex-wrap gap-4">
+            <div className="flex flex-wrap gap-4 pt-2 justify-center">
               <Button
                 type="button"
                 size="lg"
@@ -90,7 +94,7 @@ export default function Home() {
                 className="border-border text-foreground hover:bg-accent gap-2"
                 asChild
               >
-                <Link href="/login">
+                <Link href="/demo-report">
                   <BarChart3 className="w-4 h-4" />
                   View Demo Report
                 </Link>

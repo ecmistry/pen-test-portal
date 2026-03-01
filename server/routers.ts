@@ -33,6 +33,7 @@ import {
   updateTarget,
   updateUserRole,
 } from "./db";
+import type { Scan, ScanFinding, Target } from "../drizzle/schema";
 import { generateExecutiveSummary, generateJSONReport, generateMarkdownReport } from "./reportGenerator";
 import { generatePdfReport } from "./pdfReport";
 import { runScan } from "./scanEngine";
@@ -43,6 +44,90 @@ const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
   if (ctx.user.role !== "admin") throw new TRPCError({ code: "FORBIDDEN", message: "Admin access required" });
   return next({ ctx });
 });
+
+// ─── Demo report data (public, no auth) ────────────────────────────────────────
+function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFinding[]; generatedAt: Date } {
+  const generatedAt = new Date();
+  const mockScan: Scan = {
+    id: 0,
+    targetId: 0,
+    userId: 0,
+    status: "completed",
+    tools: "headers,auth,sqli,xss,recon",
+    scanMode: "full",
+    securityScore: 78,
+    riskLevel: "medium",
+    totalFindings: 3,
+    criticalCount: 0,
+    highCount: 1,
+    mediumCount: 1,
+    lowCount: 1,
+    infoCount: 0,
+    startedAt: new Date(Date.now() - 300000),
+    completedAt: new Date(),
+    errorMessage: null,
+    triggeredBy: "manual",
+    createdAt: new Date(),
+  };
+  const mockTarget: Target = {
+    id: 0,
+    userId: 0,
+    name: "Demo Application",
+    url: "https://demo.example.com",
+    description: "Sample target for demo report",
+    tags: null,
+    scanFrequency: "manual",
+    isActive: true,
+    lastScannedAt: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  const mockFindings: ScanFinding[] = [
+    {
+      id: 1,
+      scanId: 0,
+      category: "Security Headers",
+      severity: "medium",
+      title: "Missing Content-Security-Policy",
+      description: "Content-Security-Policy header is not set, which may increase the risk of XSS and injection attacks.",
+      evidence: "Header 'Content-Security-Policy' not found in response headers",
+      recommendation: "Set a restrictive CSP header (e.g. default-src 'self') to mitigate XSS.",
+      cweId: "CWE-693",
+      owaspCategory: "A05:2021 Security Misconfiguration",
+      status: "open",
+      createdAt: new Date(),
+    },
+    {
+      id: 2,
+      scanId: 0,
+      category: "Authentication",
+      severity: "high",
+      title: "No rate limiting on login",
+      description: "Multiple failed login attempts did not trigger lockout or rate limiting.",
+      evidence: "10 consecutive failed login attempts did not trigger lockout or rate limiting",
+      recommendation: "Implement account lockout or rate limiting after N failed attempts.",
+      cweId: "CWE-307",
+      owaspCategory: "A07:2021 Identification and Authentication Failures",
+      status: "open",
+      createdAt: new Date(),
+    },
+    {
+      id: 3,
+      scanId: 0,
+      category: "Information Disclosure",
+      severity: "low",
+      title: "Server header reveals version",
+      description: "The Server response header exposes product and version information.",
+      evidence: "Server: Apache/2.4.41",
+      recommendation: "Suppress or genericise the Server header to reduce information disclosure.",
+      cweId: null,
+      owaspCategory: "A05:2021 Security Misconfiguration",
+      status: "open",
+      createdAt: new Date(),
+    },
+  ];
+  return { scan: mockScan, target: mockTarget, findings: mockFindings, generatedAt };
+}
 
 // ─── Ownership guard helper ───────────────────────────────────────────────────
 function assertOwnerOrAdmin(resourceUserId: number, ctxUser: { id: number; role: string }) {
@@ -293,6 +378,23 @@ export const appRouter = router({
       const reportData = { scan, target, findings, generatedAt: report.generatedAt ?? new Date() };
       const pdfBuffer = generatePdfReport(reportData);
       return { pdfBase64: pdfBuffer.toString("base64"), title: report.title };
+    }),
+
+    getDemoReport: publicProcedure.query(() => {
+      const reportData = getDemoReportData();
+      const title = `Penetration Test Report — ${reportData.target.name} — ${reportData.generatedAt.toLocaleDateString()} (Demo)`;
+      return {
+        markdown: generateMarkdownReport(reportData),
+        title,
+        json: generateJSONReport(reportData),
+      };
+    }),
+
+    getDemoReportPdf: publicProcedure.query(() => {
+      const reportData = getDemoReportData();
+      const title = `Penetration Test Report — ${reportData.target.name} — ${reportData.generatedAt.toLocaleDateString()} (Demo)`;
+      const pdfBuffer = generatePdfReport(reportData);
+      return { pdfBase64: pdfBuffer.toString("base64"), title };
     }),
   }),
 

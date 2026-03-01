@@ -12,6 +12,7 @@ import ScanDetail from "./pages/ScanDetail";
 import Scans from "./pages/Scans";
 import Reports from "./pages/Reports";
 import ReportView from "./pages/ReportView";
+import DemoReport from "./pages/DemoReport";
 import Schedules from "./pages/Schedules";
 import AdminPanel from "./pages/AdminPanel";
 import Methodology from "./pages/Methodology";
@@ -27,6 +28,7 @@ function Router() {
       <Route path="/scans/:id" component={ScanDetail} />
       <Route path="/reports" component={Reports} />
       <Route path="/reports/:scanId" component={ReportView} />
+      <Route path="/demo-report" component={DemoReport} />
       <Route path="/schedules" component={Schedules} />
       <Route path="/methodology" component={Methodology} />
       <Route path="/admin" component={AdminPanel} />
