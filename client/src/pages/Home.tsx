@@ -1,9 +1,9 @@
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { getLoginUrl, isDevLoginEnabled } from "@/const";
-import { Shield, Zap, BarChart3, Clock, Lock, AlertTriangle, CheckCircle, ArrowRight } from "lucide-react";
+import { Zap, BarChart3, Clock, Lock, AlertTriangle, CheckCircle, ArrowRight } from "lucide-react";
 import { useEffect } from "react";
-import { useLocation } from "wouter";
+import { useLocation, Link } from "wouter";
 
 export default function Home() {
   const { user, loading, isAuthenticated } = useAuth();
@@ -19,8 +19,8 @@ export default function Home() {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="flex items-center gap-3 text-muted-foreground">
-          <Shield className="w-6 h-6 animate-pulse text-primary" />
-          <span>Loading PenTest Portal...</span>
+          <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="w-8 h-8 animate-pulse object-contain" />
+          <span>Loading Ghoststrike...</span>
         </div>
       </div>
     );
@@ -32,10 +32,8 @@ export default function Home() {
       <nav className="border-b border-border/50 bg-card/50 backdrop-blur-sm sticky top-0 z-50">
         <div className="container flex items-center justify-between h-16">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-primary/20 border border-primary/30 flex items-center justify-center">
-              <Shield className="w-4 h-4 text-primary" />
-            </div>
-            <span className="font-semibold text-foreground tracking-tight">PenTest Portal</span>
+            <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="h-8 w-auto object-contain" />
+            <span className="font-semibold text-foreground tracking-tight">Ghoststrike</span>
           </div>
           <Button
             type="button"
@@ -54,6 +52,7 @@ export default function Home() {
         <div className="absolute top-20 right-20 w-96 h-96 bg-primary/5 rounded-full blur-3xl pointer-events-none" />
         <div className="container py-24 lg:py-32">
           <div className="max-w-3xl">
+            <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="h-14 w-auto object-contain mb-8" />
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/20 text-primary text-sm font-medium mb-8">
               <Zap className="w-3.5 h-3.5" />
               Automated Weekly Penetration Testing
@@ -211,7 +210,7 @@ export default function Home() {
                 <span className="text-xs text-muted-foreground ml-2 font-mono">scan-output.log</span>
               </div>
               <div className="font-mono text-xs space-y-1">
-                <div className="text-slate-500">=== PenTest Portal Scan Started ===</div>
+                <div className="text-slate-500">=== Ghoststrike Scan Started ===</div>
                 <div className="text-slate-300">Target: https://example.com</div>
                 <div className="text-slate-300">Tools: headers, auth, sqli, xss</div>
                 <div className="text-slate-500 mt-2">─── Starting HEADERS scan ───</div>
@@ -254,12 +253,15 @@ export default function Home() {
 
       {/* Footer */}
       <footer className="border-t border-border/50 bg-card/20">
-        <div className="container py-6 flex items-center justify-between text-xs text-muted-foreground">
+        <div className="container py-6 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-muted-foreground">
           <div className="flex items-center gap-2">
-            <Shield className="w-3.5 h-3.5 text-primary" />
-            <span>PenTest Portal — Automated Security Assessment Platform</span>
+            <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="h-4 w-auto object-contain" />
+            <span>Ghoststrike — Automated Security Assessment Platform</span>
           </div>
-          <span>OWASP · PTES · NIST · CWE</span>
+          <div className="flex items-center gap-4">
+            <Link href="/methodology" className="hover:text-foreground transition-colors">Scan methodology</Link>
+            <span>OWASP · PTES · NIST · CWE</span>
+          </div>
         </div>
       </footer>
     </div>

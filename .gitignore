@@ -111,5 +111,8 @@ temp/
 
 # Dev debug logs
 .dev-logs/
+
+# Scanner cache (payloads, etc.)
+data/
 .manus-logs/
 .manus/

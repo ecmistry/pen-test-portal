@@ -13,6 +13,7 @@ import Reports from "./pages/Reports";
 import ReportView from "./pages/ReportView";
 import Schedules from "./pages/Schedules";
 import AdminPanel from "./pages/AdminPanel";
+import Methodology from "./pages/Methodology";
 
 function Router() {
   return (
@@ -25,6 +26,7 @@ function Router() {
       <Route path="/reports" component={Reports} />
       <Route path="/reports/:scanId" component={ReportView} />
       <Route path="/schedules" component={Schedules} />
+      <Route path="/methodology" component={Methodology} />
       <Route path="/admin" component={AdminPanel} />
       <Route path="/404" component={NotFound} />
       <Route component={NotFound} />

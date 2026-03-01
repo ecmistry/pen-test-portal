@@ -822,6 +822,8 @@ async function testDirectoryTraversal(scanId: number, targetUrl: string): Promis
 }
 
 // ─── HTTP Methods (full mode) ─────────────────────────────────────────────────
+const CONFIG_REQUEST_TIMEOUT_MS = 8000;
+
 async function testHTTPMethods(scanId: number, targetUrl: string): Promise<Finding[]> {
   const findings: Finding[] = [];
   await log(scanId, "info", `Testing HTTP methods for ${targetUrl}`, "config");
@@ -830,7 +832,14 @@ async function testHTTPMethods(scanId: number, targetUrl: string): Promise<Findi
 
   for (const method of methods) {
     try {
-      const { status, headers, body } = await httpGet(targetUrl, "/", { method });
+      // Hard timeout so CONNECT/TRACE etc. can never hang the scan (belt-and-suspenders with httpGet's own timeout)
+      const result = await Promise.race([
+        httpGet(targetUrl, "/", { method, timeout: CONFIG_REQUEST_TIMEOUT_MS }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("Config request timeout")), CONFIG_REQUEST_TIMEOUT_MS)
+        ),
+      ]);
+      const { status, headers, body } = result;
       if (method === "TRACE" && status === 200 && body.includes("TRACE") && body.includes("HTTP")) {
         findings.push({
           category: "Security Misconfiguration",
@@ -942,7 +951,7 @@ export async function runScan(
           try {
             const { execSync } = await import("child_process");
             execSync("which nikto", { stdio: "ignore" });
-            await log(scanId, "info", "Nikto found — running scan (this may take several minutes)...", "nikto");
+            await log(scanId, "info", "Nikto found — running scan (up to 2 minutes; no further logs until it finishes)...", "nikto");
             const output = execSync(`nikto -h ${targetUrl} -Format txt -nointeractive 2>&1`, {
               timeout: 120000,
               encoding: "utf8",
@@ -977,7 +986,7 @@ export async function runScan(
           try {
             const { execSync } = await import("child_process");
             execSync("which nuclei", { stdio: "ignore" });
-            await log(scanId, "info", "Nuclei found — running template scan...", "nuclei");
+            await log(scanId, "info", "Nuclei found — running template scan (up to 3 minutes; no further logs until it finishes)...", "nuclei");
             const output = execSync(`nuclei -u ${targetUrl} -severity medium,high,critical -silent 2>&1`, {
               timeout: 180000,
               encoding: "utf8",
@@ -1011,7 +1020,7 @@ export async function runScan(
           try {
             const { execSync } = await import("child_process");
             execSync("which zap.sh || which zap-cli", { stdio: "ignore" });
-            await log(scanId, "info", "ZAP found — running baseline scan...", "zap");
+            await log(scanId, "info", "ZAP found — running baseline scan (up to 5 minutes; no further logs until it finishes)...", "zap");
             const output = execSync(`zap-baseline.py -t ${targetUrl} -J /tmp/zap-report.json 2>&1 || zap.sh -cmd -quickurl ${targetUrl} 2>&1`, {
               timeout: 300000,
               encoding: "utf8",

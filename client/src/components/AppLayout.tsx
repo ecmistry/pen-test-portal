@@ -3,6 +3,7 @@ import { getLoginUrl } from "@/const";
 import { trpc } from "@/lib/trpc";
 import {
   BarChart3,
+  BookOpen,
   ChevronDown,
   Clock,
   FileText,
@@ -10,7 +11,6 @@ import {
   LogOut,
   Menu,
   Settings,
-  Shield,
   Target,
   Users,
   X,
@@ -25,6 +25,7 @@ const navItems = [
   { path: "/scans", label: "Scans", icon: Zap },
   { path: "/schedules", label: "Schedules", icon: Clock },
   { path: "/reports", label: "Reports", icon: FileText },
+  { path: "/methodology", label: "Methodology", icon: BookOpen },
 ];
 
 const adminItems = [
@@ -50,8 +51,8 @@ export default function AppLayout({ children, title }: AppLayoutProps) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="flex items-center gap-3 text-muted-foreground">
-          <Shield className="w-6 h-6 animate-pulse text-primary" />
-          <span>Loading...</span>
+          <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="w-8 h-8 animate-pulse object-contain" />
+          <span>Loading Ghoststrike...</span>
         </div>
       </div>
     );
@@ -68,11 +69,9 @@ export default function AppLayout({ children, title }: AppLayoutProps) {
     <div className="flex flex-col h-full">
       {/* Logo */}
       <div className="flex items-center gap-3 px-4 h-16 border-b border-border/50 shrink-0">
-        <div className="w-8 h-8 rounded-lg bg-primary/20 border border-primary/30 flex items-center justify-center">
-          <Shield className="w-4 h-4 text-primary" />
-        </div>
+        <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="h-8 w-auto object-contain" />
         <div>
-          <div className="text-sm font-semibold text-foreground">PenTest Portal</div>
+          <div className="text-sm font-semibold text-foreground">Ghoststrike</div>
           <div className="text-xs text-muted-foreground">Security Platform</div>
         </div>
       </div>

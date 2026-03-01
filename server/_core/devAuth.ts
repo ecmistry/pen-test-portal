@@ -8,7 +8,7 @@ import { sdk } from "./sdk";
 const DEV_OPEN_ID = "dev-user-local";
 
 export function registerDevAuthRoutes(app: Express) {
-  if (!ENV.devBypassAuth || ENV.isProduction) return;
+  if (!ENV.devBypassAuth) return;
 
   app.get("/api/dev-login", async (req: Request, res: Response) => {
     if (!process.env.DATABASE_URL) {
