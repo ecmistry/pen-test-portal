@@ -1,0 +1,158 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@plugin "@tailwindcss/typography";
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: oklch(0.10 0.01 240);
+  --color-foreground: oklch(0.93 0.01 240);
+  --color-card: oklch(0.13 0.01 240);
+  --color-card-foreground: oklch(0.93 0.01 240);
+  --color-popover: oklch(0.13 0.01 240);
+  --color-popover-foreground: oklch(0.93 0.01 240);
+  --color-primary: oklch(0.72 0.17 162);
+  --color-primary-foreground: oklch(0.10 0.01 240);
+  --color-secondary: oklch(0.20 0.01 240);
+  --color-secondary-foreground: oklch(0.93 0.01 240);
+  --color-muted: oklch(0.18 0.01 240);
+  --color-muted-foreground: oklch(0.55 0.01 240);
+  --color-accent: oklch(0.18 0.01 240);
+  --color-accent-foreground: oklch(0.93 0.01 240);
+  --color-destructive: oklch(0.60 0.22 25);
+  --color-destructive-foreground: oklch(0.93 0.01 240);
+  --color-border: oklch(0.22 0.01 240);
+  --color-input: oklch(0.16 0.01 240);
+  --color-ring: oklch(0.72 0.17 162);
+  --radius: 0.5rem;
+  --font-sans: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: oklch(0.13 0.01 240);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: oklch(0.28 0.01 240);
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: oklch(0.35 0.01 240);
+  }
+}
+
+@layer components {
+  /* Severity badges */
+  .badge-critical {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-red-900/40 text-red-300 border border-red-800/50;
+  }
+  .badge-high {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-orange-900/40 text-orange-300 border border-orange-800/50;
+  }
+  .badge-medium {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-yellow-900/40 text-yellow-300 border border-yellow-800/50;
+  }
+  .badge-low {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-blue-900/40 text-blue-300 border border-blue-800/50;
+  }
+  .badge-info {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold bg-slate-800/60 text-slate-400 border border-slate-700/50;
+  }
+
+  /* Scan status badges */
+  .status-queued {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-800/60 text-slate-400 border border-slate-700/50;
+  }
+  .status-running {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900/40 text-blue-300 border border-blue-800/50;
+  }
+  .status-completed {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-900/40 text-emerald-300 border border-emerald-800/50;
+  }
+  .status-failed {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-900/40 text-red-300 border border-red-800/50;
+  }
+  .status-cancelled {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-slate-800/60 text-slate-400 border border-slate-700/50;
+  }
+
+  /* Terminal / log output */
+  .terminal {
+    @apply font-mono text-xs leading-5 bg-black/60 rounded-lg;
+    color: oklch(0.80 0.01 240);
+  }
+  .log-info {
+    color: oklch(0.80 0.01 240);
+  }
+  .log-success {
+    color: oklch(0.75 0.17 162);
+  }
+  .log-warn {
+    color: oklch(0.85 0.18 85);
+  }
+  .log-error {
+    color: oklch(0.70 0.22 25);
+  }
+  .log-debug {
+    color: oklch(0.55 0.01 240);
+  }
+
+  /* Scanning pulse animation */
+  .scanning {
+    animation: pulse-scan 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse-scan {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+}
+
+/* Container */
+.container {
+  width: 100%;
+  max-width: 1280px;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 1.5rem;
+  padding-right: 1.5rem;
+}
+
+/* Flex min-width fix */
+.flex {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Prose overrides for dark theme */
+.prose-invert {
+  --tw-prose-body: oklch(0.80 0.01 240);
+  --tw-prose-headings: oklch(0.93 0.01 240);
+  --tw-prose-links: oklch(0.72 0.17 162);
+  --tw-prose-bold: oklch(0.93 0.01 240);
+  --tw-prose-counters: oklch(0.55 0.01 240);
+  --tw-prose-bullets: oklch(0.55 0.01 240);
+  --tw-prose-hr: oklch(0.22 0.01 240);
+  --tw-prose-quotes: oklch(0.80 0.01 240);
+  --tw-prose-quote-borders: oklch(0.72 0.17 162);
+  --tw-prose-captions: oklch(0.55 0.01 240);
+  --tw-prose-code: oklch(0.75 0.17 162);
+  --tw-prose-pre-code: oklch(0.80 0.01 240);
+  --tw-prose-pre-bg: oklch(0.08 0.01 240);
+  --tw-prose-th-borders: oklch(0.22 0.01 240);
+  --tw-prose-td-borders: oklch(0.22 0.01 240);
+}

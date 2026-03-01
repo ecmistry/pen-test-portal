@@ -1,0 +1,1 @@
+ALTER TABLE `scans` ADD `scanMode` varchar(20) DEFAULT 'light' NOT NULL;

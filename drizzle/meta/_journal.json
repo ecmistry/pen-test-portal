@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1772309517964,
+      "tag": "0000_hard_thaddeus_ross",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1772309648576,
+      "tag": "0001_broad_virginia_dare",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1772322170020,
+      "tag": "0002_wakeful_pestilence",
+      "breakpoints": true
+    }
+  ]
+}
