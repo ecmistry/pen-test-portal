@@ -57,7 +57,29 @@ Copy `.env.example` to `.env` and configure:
 - `pnpm start` — Run production server
 - `pnpm db:migrate` — Run database migrations
 - `pnpm db:push` — Generate migrations and run them
-- `pnpm test` — Run tests
+- `pnpm test` — Run test suite (Vitest)
+
+## Testing
+
+The project uses [Vitest](https://vitest.dev/) for unit and integration-style tests. Run all tests with:
+
+```bash
+pnpm test
+```
+
+### Test coverage
+
+| Area | Location | Description |
+|------|----------|-------------|
+| **Auth** | `server/auth.logout.test.ts`, `server/_core/adminAuth.test.ts` | Logout (tRPC), POST /api/login (invalid/valid credentials, JSON-only) |
+| **Scan engine** | `server/scanEngine.test.ts` | `calculateScore`, `isSpaFallback`, `hasFileSpecificContent` |
+| **tRPC routers** | `server/routers.test.ts` | `auth.me`, `targets.list`, `targets.get`, `scans.get`, `scans.list` (with mocked db) |
+| **Database** | `server/db.test.ts` | `getDb` when `DATABASE_URL` is unset |
+| **Reports** | `server/reportGenerator.test.ts` | `generateMarkdownReport`, `generateExecutiveSummary`, `generateJSONReport` |
+
+Client tests (React components) can be added under `client/src/**/*.test.tsx`; the Vitest config is set up to run them with a jsdom environment.
+
+**Coverage:** Run `pnpm test --coverage`. Coverage is reported for the testable server surface; bootstrap and integration-heavy modules (e.g. `db`, `scanEngine`, `sdk`, `oauth`, `index`, `vite`) are excluded so the percentage reflects unit-testable code.
 
 ## Tech Stack
 

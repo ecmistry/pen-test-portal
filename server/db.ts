@@ -170,6 +170,27 @@ export async function getActiveScans() {
   ).orderBy(scans.createdAt);
 }
 
+/** Mark any scans still "queued" or "running" as failed (e.g. after server restart). Call on startup. */
+export async function failStaleScansOnStartup(): Promise<number> {
+  const db = await getDb();
+  if (!db) return 0;
+  const now = new Date();
+  const result = await db
+    .update(scans)
+    .set({
+      status: "failed",
+      completedAt: now,
+      errorMessage: "Scan interrupted (server restarted or process ended).",
+    })
+    .where(sql`${scans.status} IN ('queued', 'running')`);
+  const row = Array.isArray(result) ? result[0] : result;
+  const affected = (row as { affectedRows?: number })?.affectedRows ?? 0;
+  if (affected > 0) {
+    console.log(`[Startup] Marked ${affected} stale scan(s) as failed.`);
+  }
+  return affected;
+}
+
 // ─── Scan Findings ────────────────────────────────────────────────────────────
 export async function getFindingsByScan(scanId: number) {
   const db = await getDb();

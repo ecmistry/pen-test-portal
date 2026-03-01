@@ -3,6 +3,7 @@ import express from "express";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
+import * as db from "../db";
 import { registerAdminAuthRoutes } from "./adminAuth";
 import { registerDevAuthRoutes } from "./devAuth";
 import { registerOAuthRoutes } from "./oauth";
@@ -30,6 +31,9 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
+  // Mark any scans left "running" or "queued" by a previous process as failed (e.g. after restart/crash)
+  await db.failStaleScansOnStartup().catch((err) => console.warn("[Startup] failStaleScansOnStartup:", err.message));
+
   const app = express();
   const server = createServer(app);
   // Configure body parser with larger size limit for file uploads

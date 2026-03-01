@@ -17,13 +17,38 @@
  *   config   — Backup files, deployment config (full mode only)
  *   nikto    — Nikto web server scanner (requires nikto installed)
  *   nuclei   — Nuclei vulnerability scanner (requires nuclei installed)
+ *   wapiti   — Wapiti black-box scanner, full mode only (optional; pip install wapiti3)
  *   zap      — OWASP ZAP baseline scan (requires zap.sh installed)
  */
 
 import https from "https";
 import http from "http";
 import { URL } from "url";
+import { exec as execCb } from "child_process";
+import { promisify } from "util";
 import { appendScanLog, createFindings, updateScan, updateTarget } from "./db";
+
+const execAsync = promisify(execCb);
+
+/** Run a command and always resolve with { stdout, stderr, code }; never reject on non-zero exit (so we can capture scanner output). */
+function execCapture(
+  command: string,
+  options: { timeout?: number; encoding?: BufferEncoding; maxBuffer?: number; env?: NodeJS.ProcessEnv }
+): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  return new Promise((resolve, reject) => {
+    execCb(command, options, (err, stdout, stderr) => {
+      if (err && err.code === undefined && err.signal === undefined) {
+        reject(err);
+        return;
+      }
+      resolve({
+        stdout: typeof stdout === "string" ? stdout : (stdout ?? "").toString(),
+        stderr: typeof stderr === "string" ? stderr : (stderr ?? "").toString(),
+        code: err ? (err as { code?: number }).code ?? 1 : 0,
+      });
+    });
+  });
+}
 import { InsertScanFinding } from "../drizzle/schema";
 import { getPenTestCache } from "./penTestUpdater";
 
@@ -587,8 +612,8 @@ async function testXSS(scanId: number, targetUrl: string, scanMode: ScanMode): P
 }
 
 // ─── SPA Fallback Detection (reduces false positives) ───────────────────────────
-/** Returns true if response looks like SPA fallback (index.html), not actual file content */
-function isSpaFallback(body: string, contentType: string): boolean {
+/** Returns true if response looks like SPA fallback (index.html), not actual file content. Exported for tests. */
+export function isSpaFallback(body: string, contentType: string): boolean {
   const ct = (contentType || "").toLowerCase();
   if (ct.includes("text/html")) {
     const trimmed = body.trim().toLowerCase();
@@ -597,8 +622,8 @@ function isSpaFallback(body: string, contentType: string): boolean {
   return false;
 }
 
-/** Check if body contains file-specific content (real exposure vs SPA fallback) */
-function hasFileSpecificContent(path: string, body: string): boolean {
+/** Check if body contains file-specific content (real exposure vs SPA fallback). Exported for tests. */
+export function hasFileSpecificContent(path: string, body: string): boolean {
   const b = body.substring(0, 2000);
   if (path.includes(".env")) {
     return /^[A-Z_][A-Z0-9_]*\s*=/m.test(b) && !b.trim().toLowerCase().startsWith("<!doctype");
@@ -868,18 +893,26 @@ async function testHTTPMethods(scanId: number, targetUrl: string): Promise<Findi
 }
 
 // ─── Score Calculator ─────────────────────────────────────────────────────────
-function calculateScore(findings: Finding[]): { score: number; riskLevel: "critical" | "high" | "medium" | "low" | "info" } {
+// Cap how many findings per severity count toward the score so many mediums don't force 0/100.
+const SCORE_CAP: Record<Finding["severity"], { deduction: number; maxCount: number }> = {
+  critical: { deduction: 22, maxCount: 2 },
+  high: { deduction: 12, maxCount: 3 },
+  medium: { deduction: 5, maxCount: 6 },
+  low: { deduction: 2, maxCount: 5 },
+  info: { deduction: 0.5, maxCount: 5 },
+};
+
+/** Exported for unit tests. */
+export function calculateScore(findings: Pick<Finding, "severity">[]): { score: number; riskLevel: "critical" | "high" | "medium" | "low" | "info" } {
+  const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   let deductions = 0;
   for (const f of findings) {
-    switch (f.severity) {
-      case "critical": deductions += 25; break;
-      case "high": deductions += 15; break;
-      case "medium": deductions += 8; break;
-      case "low": deductions += 3; break;
-      case "info": deductions += 1; break;
-    }
+    const cap = SCORE_CAP[f.severity];
+    if (counts[f.severity] >= cap.maxCount) continue;
+    counts[f.severity]++;
+    deductions += cap.deduction;
   }
-  const score = Math.max(0, 100 - deductions);
+  const score = Math.round(Math.max(0, Math.min(100, 100 - deductions)));
   let riskLevel: "critical" | "high" | "medium" | "low" | "info" = "info";
   if (score < 40) riskLevel = "critical";
   else if (score < 60) riskLevel = "high";
@@ -909,7 +942,7 @@ export async function runScan(
   // Full mode: add extra tools (cors, traversal, config) and external tools (nikto, nuclei, zap)
   const toolsToRun = Array.from(new Set(toolList.map((t) => t.toLowerCase().trim())));
   if (scanMode === "full") {
-    for (const t of ["cors", "traversal", "config", "nikto", "nuclei", "zap"]) {
+    for (const t of ["cors", "traversal", "config", "nikto", "nuclei", "wapiti", "zap"]) {
       if (!toolsToRun.includes(t)) toolsToRun.push(t);
     }
   }
@@ -950,7 +983,8 @@ export async function runScan(
           await log(scanId, "info", "Nikto scan: checking if nikto is available...", "nikto");
           const { execSync } = await import("child_process");
           const { existsSync } = await import("fs");
-          const niktoPaths = ["nikto", "/usr/local/bin/nikto", "/usr/bin/nikto"];
+          // Prefer full paths so scans work when PATH is minimal (e.g. systemd)
+          const niktoPaths = ["/usr/local/bin/nikto", "/usr/bin/nikto", "nikto"];
           let niktoCmd = niktoPaths.find((p) => {
             if (p === "nikto") {
               try {
@@ -962,83 +996,214 @@ export async function runScan(
             }
             return existsSync(p);
           }) ?? "nikto";
+          let niktoAvailable = false;
           try {
             execSync(`${niktoCmd} -Version`, { stdio: "ignore", encoding: "utf8" });
-            await log(scanId, "info", "Nikto found — running scan (up to 2 minutes; no further logs until it finishes)...", "nikto");
-            const output = execSync(`${niktoCmd} -h ${targetUrl} -Format txt -nointeractive 2>&1`, {
-              timeout: 120000,
-              encoding: "utf8",
-            });
-            await log(scanId, "info", output.substring(0, 2000), "nikto");
-            // Parse Nikto output for findings
-            const niktoLines = output.split("\n").filter((l) => l.includes("OSVDB") || l.includes("+ "));
-            for (const line of niktoLines.slice(0, 20)) {
-              if (line.trim().startsWith("+")) {
-                toolFindings.push({
-                  category: "Nikto",
-                  severity: "medium",
-                  title: line.trim().substring(0, 200),
-                  description: line.trim(),
-                  recommendation: "Review and remediate the identified issue.",
-                });
+            niktoAvailable = true;
+            await log(scanId, "info", "Nikto found — running scan (up to 3 minutes; no further logs until it finishes)...", "nikto");
+            const niktoExtra = scanMode === "full" ? "-C all -maxtime 180" : "";
+            const niktoOpts = `-Format txt -nointeractive ${niktoExtra}`.trim();
+            const execOpts = {
+              timeout: 200000,
+              encoding: "utf8" as const,
+              maxBuffer: 4 * 1024 * 1024,
+              env: { ...process.env, PERL_LWP_SSL_VERIFY_HOSTNAME: "0" } as NodeJS.ProcessEnv,
+            };
+            let output = "";
+            try {
+              const { stdout, stderr, code } = await execCapture(
+                `${niktoCmd} -h ${targetUrl} ${niktoOpts} 2>&1`,
+                execOpts
+              );
+              output = (stdout || stderr || "").trim();
+              if (code !== 0 && output) {
+                await log(scanId, "info", "Nikto completed (non-zero exit often indicates findings; output above).", "nikto");
+              }
+            } catch (runErr: unknown) {
+              const e = runErr as { stdout?: string; stderr?: string };
+              output = e?.stdout ?? e?.stderr ?? "";
+              if (output) {
+                await log(scanId, "info", "Nikto completed (some scanners exit non-zero when findings are present; output above was captured).", "nikto");
+              } else {
+                throw runErr;
               }
             }
-          } catch {
-            await log(scanId, "warn", "Nikto not installed or scan failed. Install to /opt/nikto and symlink to /usr/local/bin/nikto.", "nikto");
-            toolFindings.push({
-              category: "Tool Availability",
-              severity: "info",
-              title: "Nikto scanner not available",
-              description: "Nikto is not installed on the scan server. Install it to enable web server vulnerability scanning.",
-              recommendation: "Clone https://github.com/sullo/nikto to /opt/nikto and add a nikto wrapper in /usr/local/bin.",
-            });
+            if (output) {
+              await log(scanId, "info", output.substring(0, 2000), "nikto");
+              const niktoLines = output.split("\n").filter((l) => l.includes("OSVDB") || l.includes("+ "));
+              for (const line of niktoLines.slice(0, 50)) {
+                if (line.trim().startsWith("+")) {
+                  toolFindings.push({
+                    category: "Nikto",
+                    severity: "medium",
+                    title: line.trim().substring(0, 200),
+                    description: line.trim(),
+                    recommendation: "Review and remediate the identified issue.",
+                  });
+                }
+              }
+            }
+          } catch (err) {
+            if (!niktoAvailable) {
+              await log(scanId, "warn", "Nikto not installed. Install to /opt/nikto and symlink to /usr/local/bin/nikto.", "nikto");
+              toolFindings.push({
+                category: "Tool Availability",
+                severity: "info",
+                title: "Nikto scanner not available",
+                description: "Nikto is not installed on the scan server. Install it to enable web server vulnerability scanning.",
+                recommendation: "Clone https://github.com/sullo/nikto to /opt/nikto and add a nikto wrapper in /usr/local/bin.",
+              });
+            } else {
+              const msg = (err as Error).message;
+              const friendlyMsg = msg.startsWith("Command failed:") && msg.includes("nikto")
+                ? "Nikto scan failed (timeout or command error). If Nikto produced output, check the log above."
+                : `Nikto scan failed (timeout or error): ${msg}`;
+              await log(scanId, "warn", friendlyMsg, "nikto");
+            }
           }
           break;
         }
-        case "nuclei":
+        case "nuclei": {
           await log(scanId, "info", "Nuclei scan: checking if nuclei is available...", "nuclei");
+          const { execSync } = await import("child_process");
+          const { existsSync } = await import("fs");
+          const nucleiPaths = ["/usr/local/bin/nuclei", "/usr/bin/nuclei", "nuclei"];
+          const nucleiCmd =
+            nucleiPaths.find((p) => {
+              if (p === "nuclei") {
+                try {
+                  execSync("which nuclei", { stdio: "ignore", encoding: "utf8" });
+                  return true;
+                } catch {
+                  return false;
+                }
+              }
+              return existsSync(p);
+            }) ?? "nuclei";
+          let nucleiAvailable = false;
           try {
-            const { execSync } = await import("child_process");
-            execSync("which nuclei", { stdio: "ignore" });
-            await log(scanId, "info", "Nuclei found — running template scan (up to 3 minutes; no further logs until it finishes)...", "nuclei");
-            const output = execSync(`nuclei -u ${targetUrl} -severity medium,high,critical -silent 2>&1`, {
-              timeout: 180000,
-              encoding: "utf8",
-            });
-            const lines = output.split("\n").filter((l) => l.trim());
-            for (const line of lines.slice(0, 30)) {
-              const severityMatch = line.match(/\[(critical|high|medium|low|info)\]/i);
-              const sev = (severityMatch?.[1]?.toLowerCase() as Finding["severity"]) || "medium";
-              toolFindings.push({
-                category: "Nuclei",
-                severity: sev,
-                title: line.substring(0, 200),
-                description: line,
-                recommendation: "Review and remediate the identified vulnerability.",
-              });
+            try {
+              execSync(`${nucleiCmd} -version`, { stdio: "ignore", encoding: "utf8", timeout: 5000 });
+              nucleiAvailable = true;
+            } catch {
+              if (nucleiCmd.startsWith("/") && existsSync(nucleiCmd)) nucleiAvailable = true;
             }
-            await log(scanId, "info", `Nuclei found ${toolFindings.length} findings`, "nuclei");
+            if (!nucleiAvailable) throw new Error("Nuclei not found");
+            await log(scanId, "info", "Nuclei found — running template scan (up to 5 minutes; low/medium/high/critical + CVE/misconfig tags)...", "nuclei");
+            let output = "";
+            const nucleiSeverity = scanMode === "full" ? "low,medium,high,critical" : "medium,high,critical";
+            const nucleiTags = scanMode === "full" ? "-tags cve,misconfig,exposure,takeover" : "";
+            try {
+              const result = await execAsync(`${nucleiCmd} -u ${targetUrl} -severity ${nucleiSeverity} ${nucleiTags} -silent 2>&1`.trim(), {
+                timeout: 300000,
+                encoding: "utf8",
+                maxBuffer: 4 * 1024 * 1024,
+              });
+              const res = result as { stdout?: string } | [string, string];
+              output = Array.isArray(res) ? (res[0] ?? "") : (res.stdout ?? "");
+            } catch (runErr: unknown) {
+              const e = runErr as { stdout?: string; stderr?: string; message?: string };
+              output = e?.stdout ?? e?.stderr ?? "";
+              if (output) {
+                await log(scanId, "info", "Nuclei completed (some scanners exit non-zero when findings are present; output above was captured).", "nuclei");
+              }
+            }
+            if (output) {
+              const lines = output.split("\n").filter((l) => l.trim());
+              for (const line of lines.slice(0, 30)) {
+                const severityMatch = line.match(/\[(critical|high|medium|low|info)\]/i);
+                const sev = (severityMatch?.[1]?.toLowerCase() as Finding["severity"]) || "medium";
+                toolFindings.push({
+                  category: "Nuclei",
+                  severity: sev,
+                  title: line.substring(0, 200),
+                  description: line,
+                  recommendation: "Review and remediate the identified vulnerability.",
+                });
+              }
+              await log(scanId, "info", `Nuclei found ${toolFindings.length} findings`, "nuclei");
+            }
           } catch {
-            await log(scanId, "warn", "Nuclei not installed or scan failed. Install from: https://github.com/projectdiscovery/nuclei", "nuclei");
-            toolFindings.push({
-              category: "Tool Availability",
-              severity: "info",
-              title: "Nuclei scanner not available",
-              description: "Nuclei is not installed on the scan server.",
-              recommendation: "Install Nuclei: go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest",
-            });
+            if (!nucleiAvailable) {
+              await log(scanId, "warn", "Nuclei not installed. Install to /usr/local/bin/nuclei or see https://github.com/projectdiscovery/nuclei", "nuclei");
+              toolFindings.push({
+                category: "Tool Availability",
+                severity: "info",
+                title: "Nuclei scanner not available",
+                description: "Nuclei is not installed on the scan server.",
+                recommendation: "Install Nuclei: download from https://github.com/projectdiscovery/nuclei/releases and place nuclei in /usr/local/bin.",
+              });
+            } else {
+              await log(scanId, "warn", "Nuclei scan failed (timeout or error).", "nuclei");
+            }
           }
           break;
+        }
+        case "wapiti": {
+          await log(scanId, "info", "Wapiti scan: checking if wapiti is available...", "wapiti");
+          const { execSync } = await import("child_process");
+          const { existsSync } = await import("fs");
+          const { readFile } = await import("fs/promises");
+          const wapitiPaths = ["/usr/local/bin/wapiti", "/usr/local/bin/wapiti3", "/usr/bin/wapiti", "/usr/bin/wapiti3", "wapiti", "wapiti3"];
+          const wapitiCmd = wapitiPaths.find((p) => {
+            if (p === "wapiti" || p === "wapiti3") {
+              try {
+                execSync(`which ${p}`, { stdio: "ignore", encoding: "utf8" });
+                return true;
+              } catch {
+                return false;
+              }
+            }
+            return existsSync(p);
+          });
+          if (!wapitiCmd) {
+            await log(scanId, "info", "Wapiti not installed (optional). Install: pip install wapiti3", "wapiti");
+            break;
+          }
+          const wapitiOut = `/tmp/wapiti-${scanId}.json`;
+          try {
+            await log(scanId, "info", "Wapiti found — running crawl + modules (up to 5 minutes)...", "wapiti");
+            await execAsync(`${wapitiCmd} -u ${targetUrl} -f json -o ${wapitiOut} -v 0 --scope domain`, {
+              timeout: 300000,
+              encoding: "utf8",
+              maxBuffer: 8 * 1024 * 1024,
+            });
+            const raw = await readFile(wapitiOut, "utf8").catch(() => "{}");
+            const data = JSON.parse(raw) as Record<string, unknown>;
+            const vulns = (data?.vulnerabilities ?? data?.flaws ?? data?.vulns) as Record<string, { severity?: number; desc?: string; name?: string; title?: string }[]> | undefined;
+            if (vulns && typeof vulns === "object" && !Array.isArray(vulns)) {
+              for (const [name, items] of Object.entries(vulns)) {
+                if (!Array.isArray(items)) continue;
+                for (const v of items.slice(0, 10)) {
+                  const severity = (v.severity === 3 ? "high" : v.severity === 2 ? "medium" : "low") as Finding["severity"];
+                  toolFindings.push({
+                    category: "Wapiti",
+                    severity,
+                    title: (v.name ?? v.title ?? name) as string,
+                    description: (v.desc ?? v.name ?? name) as string,
+                    recommendation: "Review and remediate the reported issue.",
+                  });
+                }
+              }
+            }
+            await log(scanId, "info", `Wapiti found ${toolFindings.length} finding(s)`, "wapiti");
+          } catch (err) {
+            await log(scanId, "warn", `Wapiti scan failed or not installed: ${(err as Error).message}`, "wapiti");
+          }
+          break;
+        }
         case "zap":
           await log(scanId, "info", "OWASP ZAP scan: checking if zap is available...", "zap");
           try {
             const { execSync } = await import("child_process");
             execSync("which zap.sh || which zap-cli", { stdio: "ignore" });
             await log(scanId, "info", "ZAP found — running baseline scan (up to 5 minutes; no further logs until it finishes)...", "zap");
-            const output = execSync(`zap-baseline.py -t ${targetUrl} -J /tmp/zap-report.json 2>&1 || zap.sh -cmd -quickurl ${targetUrl} 2>&1`, {
+            const { stdout } = await execAsync(`zap-baseline.py -t ${targetUrl} -J /tmp/zap-report.json 2>&1 || zap.sh -cmd -quickurl ${targetUrl} 2>&1`, {
               timeout: 300000,
               encoding: "utf8",
+              maxBuffer: 4 * 1024 * 1024,
             });
+            const output = stdout ?? "";
             await log(scanId, "info", output.substring(0, 2000), "zap");
             toolFindings.push({
               category: "OWASP ZAP",

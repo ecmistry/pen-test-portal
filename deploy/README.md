@@ -66,10 +66,35 @@ pnpm build
 sudo systemctl restart pentest-portal
 ```
 
+## Nginx proxy timeouts
+
+If scan pages show **504 Gateway Time-out** or **ERR_EMPTY_RESPONSE** while a scan is running, increase proxy timeouts in your nginx server block (e.g. in `/etc/nginx/conf.d/galaxy-api.conf`). Inside the `location /` block that has `proxy_pass http://127.0.0.1:3000`, add:
+
+```nginx
+proxy_connect_timeout 75s;
+proxy_send_timeout 300s;
+proxy_read_timeout 300s;
+```
+
+Then run `sudo nginx -t && sudo systemctl reload nginx`. The repo’s `deploy/nginx-galaxy-api.conf` includes these. (Certbot may have rewritten your file; re-add the timeouts after any certbot change.)
+
 ## DNS and firewall
 
 - **DNS**: Point `galaxy-api.tech` (and optionally `www.galaxy-api.tech`) to this server’s **public IP** (current: **52.56.193.19**).
 - **Security group**: Allow **inbound TCP 80 and 443** so nginx can receive HTTP (redirect) and HTTPS traffic.
+
+## Optional scan tools (full-mode comprehensiveness)
+
+For the most comprehensive full-mode scans, install these free tools so the portal can run them:
+
+| Tool   | Purpose                         | Install (example) |
+|--------|----------------------------------|-------------------|
+| Nikto  | Web server / misconfiguration   | Clone [sullo/nikto](https://github.com/sullo/nikto), symlink to `/usr/local/bin/nikto` |
+| Nuclei | CVE / misconfig / takeover      | [Releases](https://github.com/projectdiscovery/nuclei/releases) → binary in `/usr/local/bin`; run `nuclei -update-templates` or use **Admin → Update scan capabilities** |
+| Wapiti | Black-box (SQLi, XSS, XXE, etc.) | `pip install wapiti3`; ensure `wapiti` or `wapiti3` is on PATH or in `/usr/local/bin` |
+| ZAP    | OWASP DAST baseline             | [zaproxy.org/download](https://www.zaproxy.org/download/) (e.g. `zap.sh` or `zap-baseline.py` on PATH) |
+
+The portal detects each tool at scan time; if missing, that phase is skipped and (where applicable) an informational finding is recorded.
 
 ## Login
 
