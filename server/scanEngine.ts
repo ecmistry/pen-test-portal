@@ -42,8 +42,8 @@ function execCapture(
         return;
       }
       resolve({
-        stdout: typeof stdout === "string" ? stdout : (stdout ?? "").toString(),
-        stderr: typeof stderr === "string" ? stderr : (stderr ?? "").toString(),
+        stdout: typeof stdout === "string" ? stdout : String(stdout ?? ""),
+        stderr: typeof stderr === "string" ? stderr : String(stderr ?? ""),
         code: err ? (err as { code?: number }).code ?? 1 : 0,
       });
     });

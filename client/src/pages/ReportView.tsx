@@ -2,11 +2,24 @@ import AppLayout from "@/components/AppLayout";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { useParams, Link } from "wouter";
-import { Download, FileText, Loader2, ArrowLeft, Code } from "lucide-react";
+import { Download, FileText, Loader2, ArrowLeft, Code, FileDown } from "lucide-react";
 import { Streamdown } from "streamdown";
 
 function downloadFile(content: string, filename: string, mimeType: string) {
   const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadPdfFromBase64(pdfBase64: string, filename: string) {
+  const binary = atob(pdfBase64);
+  const arr = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) arr[i] = binary.charCodeAt(i);
+  const blob = new Blob([arr], { type: "application/pdf" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -21,6 +34,10 @@ export default function ReportView() {
 
   const { data: reportData, isLoading } = trpc.reports.getMarkdown.useQuery({ scanId });
   const { data: jsonData } = trpc.reports.getJSON.useQuery({ scanId });
+  const { refetch: fetchPdf, isFetching: isPdfLoading } = trpc.reports.getPDF.useQuery(
+    { scanId },
+    { enabled: false }
+  );
 
   if (isLoading) {
     return (
@@ -61,6 +78,13 @@ export default function ReportView() {
     downloadFile(JSON.stringify(jsonData.json, null, 2), filename, "application/json");
   }
 
+  async function handleDownloadPdf() {
+    const result = await fetchPdf();
+    if (result.data?.pdfBase64) {
+      downloadPdfFromBase64(result.data.pdfBase64, `pentest-report-scan-${scanId}.pdf`);
+    }
+  }
+
   return (
     <AppLayout title="Security Report">
       <div className="p-6 space-y-6">
@@ -76,6 +100,20 @@ export default function ReportView() {
             <h2 className="text-xl font-semibold text-foreground">{reportData.title}</h2>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-border text-foreground hover:bg-accent gap-1.5"
+              onClick={handleDownloadPdf}
+              disabled={isPdfLoading}
+            >
+              {isPdfLoading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <FileDown className="w-3.5 h-3.5" />
+              )}{" "}
+              PDF
+            </Button>
             <Button
               size="sm"
               variant="outline"

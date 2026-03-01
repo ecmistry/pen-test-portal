@@ -34,6 +34,7 @@ import {
   updateUserRole,
 } from "./db";
 import { generateExecutiveSummary, generateJSONReport, generateMarkdownReport } from "./reportGenerator";
+import { generatePdfReport } from "./pdfReport";
 import { runScan } from "./scanEngine";
 import { getPenTestCache, updatePenTestCapabilities } from "./penTestUpdater";
 
@@ -278,6 +279,20 @@ export const appRouter = router({
       const report = await getReportByScan(input.scanId);
       if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not generated yet" });
       return { json: report.jsonContent, title: report.title };
+    }),
+
+    getPDF: protectedProcedure.input(z.object({ scanId: z.number() })).query(async ({ ctx, input }) => {
+      const scan = await getScanById(input.scanId);
+      if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+      assertOwnerOrAdmin(scan.userId, ctx.user);
+      const report = await getReportByScan(input.scanId);
+      if (!report) throw new TRPCError({ code: "NOT_FOUND", message: "Report not generated yet" });
+      const target = await getTargetById(scan.targetId);
+      if (!target) throw new TRPCError({ code: "NOT_FOUND", message: "Target not found" });
+      const findings = await getFindingsByScan(input.scanId);
+      const reportData = { scan, target, findings, generatedAt: report.generatedAt ?? new Date() };
+      const pdfBuffer = generatePdfReport(reportData);
+      return { pdfBase64: pdfBuffer.toString("base64"), title: report.title };
     }),
   }),
 
