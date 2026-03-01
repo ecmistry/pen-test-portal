@@ -180,6 +180,19 @@ export default function ScanDetail() {
           </div>
         )}
 
+        {/* "Still working" indicator when scan is running */}
+        {isRunning && (
+          <div className="flex items-center gap-3 rounded-xl border border-blue-800/50 bg-blue-950/30 px-4 py-3 text-blue-200">
+            <Loader2 className="w-5 h-5 shrink-0 animate-spin" />
+            <div>
+              <p className="font-medium">Scan in progress</p>
+              <p className="text-sm text-blue-300/90">
+                Some steps (e.g. Nikto, Nuclei, ZAP) can take 2–5 minutes with no new log lines. The page will update automatically.
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* Live log terminal */}
         <div className="bg-card border border-border rounded-xl overflow-hidden">
           <div className="flex items-center justify-between px-5 py-3 border-b border-border/50">
@@ -187,6 +200,9 @@ export default function ScanDetail() {
               <div className={`w-2 h-2 rounded-full ${isRunning ? "bg-blue-400 scanning" : scan.status === "completed" ? "bg-emerald-400" : "bg-red-400"}`} />
               <span className="text-sm font-semibold text-foreground">Scan Output</span>
               {logs && <span className="text-xs text-muted-foreground">({logs.length} lines)</span>}
+              {isRunning && logs && logs.length > 0 && (
+                <span className="text-xs text-muted-foreground">· updating every 2s</span>
+              )}
             </div>
             {logs && logs.length > 50 && (
               <button

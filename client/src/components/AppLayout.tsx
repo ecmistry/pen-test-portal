@@ -1,5 +1,4 @@
 import { useAuth } from "@/_core/hooks/useAuth";
-import { getLoginUrl } from "@/const";
 import { trpc } from "@/lib/trpc";
 import {
   BarChart3,
@@ -59,7 +58,7 @@ export default function AppLayout({ children, title }: AppLayoutProps) {
   }
 
   if (!isAuthenticated) {
-    window.location.href = getLoginUrl();
+    window.location.href = "/login";
     return null;
   }
 

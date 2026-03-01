@@ -946,13 +946,26 @@ export async function runScan(
         case "config":
           toolFindings = await testHTTPMethods(scanId, targetUrl);
           break;
-        case "nikto":
+        case "nikto": {
           await log(scanId, "info", "Nikto scan: checking if nikto is available...", "nikto");
+          const { execSync } = await import("child_process");
+          const { existsSync } = await import("fs");
+          const niktoPaths = ["nikto", "/usr/local/bin/nikto", "/usr/bin/nikto"];
+          let niktoCmd = niktoPaths.find((p) => {
+            if (p === "nikto") {
+              try {
+                execSync("which nikto", { stdio: "ignore", encoding: "utf8" });
+                return true;
+              } catch {
+                return false;
+              }
+            }
+            return existsSync(p);
+          }) ?? "nikto";
           try {
-            const { execSync } = await import("child_process");
-            execSync("which nikto", { stdio: "ignore" });
+            execSync(`${niktoCmd} -Version`, { stdio: "ignore", encoding: "utf8" });
             await log(scanId, "info", "Nikto found — running scan (up to 2 minutes; no further logs until it finishes)...", "nikto");
-            const output = execSync(`nikto -h ${targetUrl} -Format txt -nointeractive 2>&1`, {
+            const output = execSync(`${niktoCmd} -h ${targetUrl} -Format txt -nointeractive 2>&1`, {
               timeout: 120000,
               encoding: "utf8",
             });
@@ -971,16 +984,17 @@ export async function runScan(
               }
             }
           } catch {
-            await log(scanId, "warn", "Nikto not installed or scan failed. Install with: sudo apt-get install nikto", "nikto");
+            await log(scanId, "warn", "Nikto not installed or scan failed. Install to /opt/nikto and symlink to /usr/local/bin/nikto.", "nikto");
             toolFindings.push({
               category: "Tool Availability",
               severity: "info",
               title: "Nikto scanner not available",
               description: "Nikto is not installed on the scan server. Install it to enable web server vulnerability scanning.",
-              recommendation: "Install Nikto: sudo apt-get install nikto",
+              recommendation: "Clone https://github.com/sullo/nikto to /opt/nikto and add a nikto wrapper in /usr/local/bin.",
             });
           }
           break;
+        }
         case "nuclei":
           await log(scanId, "info", "Nuclei scan: checking if nuclei is available...", "nuclei");
           try {

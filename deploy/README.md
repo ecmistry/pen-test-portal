@@ -68,7 +68,7 @@ sudo systemctl restart pentest-portal
 
 ## DNS and firewall
 
-- **DNS**: Point `galaxy-api.tech` (and optionally `www.galaxy-api.tech`) to this server’s **public IP**.
+- **DNS**: Point `galaxy-api.tech` (and optionally `www.galaxy-api.tech`) to this server’s **public IP** (current: **52.56.193.19**).
 - **Security group**: Allow **inbound TCP 80 and 443** so nginx can receive HTTP (redirect) and HTTPS traffic.
 
 ## Login

@@ -3,6 +3,7 @@ import express from "express";
 import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
+import { registerAdminAuthRoutes } from "./adminAuth";
 import { registerDevAuthRoutes } from "./devAuth";
 import { registerOAuthRoutes } from "./oauth";
 import { appRouter } from "../routers";
@@ -36,6 +37,7 @@ async function startServer() {
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerOAuthRoutes(app);
   registerDevAuthRoutes(app);
+  registerAdminAuthRoutes(app);
   // tRPC API
   app.use(
     "/api/trpc",

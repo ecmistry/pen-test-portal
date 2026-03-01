@@ -1,7 +1,6 @@
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { trpc } from "@/lib/trpc";
-import { getLoginUrl } from "@/const";
 import { FileText, Loader2 } from "lucide-react";
 import { Link } from "wouter";
 import { Streamdown } from "streamdown";
@@ -68,9 +67,9 @@ export default function Methodology() {
             <Link href="/">
               <Button variant="ghost" size="sm">Home</Button>
             </Link>
-            <Button size="sm" className="bg-primary text-primary-foreground" onClick={() => { window.location.href = getLoginUrl(); }}>
-              Sign In
-            </Button>
+            <Link href="/login">
+              <Button size="sm" className="bg-primary text-primary-foreground">Sign In</Button>
+            </Link>
           </div>
         </div>
       </nav>

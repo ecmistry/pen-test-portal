@@ -13,4 +13,6 @@ export const ENV = {
   forgeApiKey:
     process.env.BUILT_IN_FORGE_API_KEY ?? process.env.GEMINI_API_KEY ?? "",
   devBypassAuth: process.env.DEV_BYPASS_AUTH === "true",
+  adminEmail: process.env.ADMIN_EMAIL ?? "",
+  adminPassword: process.env.ADMIN_PASSWORD ?? "",
 };

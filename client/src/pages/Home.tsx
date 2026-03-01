@@ -1,7 +1,6 @@
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
-import { getLoginUrl, isDevLoginEnabled } from "@/const";
-import { Zap, BarChart3, Clock, Lock, AlertTriangle, CheckCircle, ArrowRight } from "lucide-react";
+import { Zap, BarChart3, Clock, Lock, Shield, AlertTriangle, CheckCircle, ArrowRight } from "lucide-react";
 import { useEffect } from "react";
 import { useLocation, Link } from "wouter";
 
@@ -35,14 +34,25 @@ export default function Home() {
             <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="h-8 w-auto object-contain" />
             <span className="font-semibold text-foreground tracking-tight">Ghoststrike</span>
           </div>
-          <Button
-            type="button"
-            size="sm"
-            className="bg-primary text-primary-foreground hover:bg-primary/90"
-            onClick={() => { window.location.href = getLoginUrl(); }}
-          >
-            {isDevLoginEnabled() ? "Dev Login" : "Sign In"}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="border-border"
+              asChild
+            >
+              <Link href="/login">Sign In</Link>
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+              asChild
+            >
+              <Link href="/login">Get Started</Link>
+            </Button>
+          </div>
         </div>
       </nav>
 
@@ -52,7 +62,7 @@ export default function Home() {
         <div className="absolute top-20 right-20 w-96 h-96 bg-primary/5 rounded-full blur-3xl pointer-events-none" />
         <div className="container py-24 lg:py-32">
           <div className="max-w-3xl">
-            <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="h-14 w-auto object-contain mb-8" />
+            <img src="/ghoststrike-logo.png" alt="Ghoststrike" className="h-32 w-auto object-contain mb-8" />
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-primary/10 border border-primary/20 text-primary text-sm font-medium mb-8">
               <Zap className="w-3.5 h-3.5" />
               Automated Weekly Penetration Testing
@@ -69,19 +79,21 @@ export default function Home() {
                 type="button"
                 size="lg"
                 className="bg-primary text-primary-foreground hover:bg-primary/90 gap-2"
-                onClick={() => { window.location.href = getLoginUrl(); }}
+                asChild
               >
-                Get Started <ArrowRight className="w-4 h-4" />
+                <Link href="/login">Get Started <ArrowRight className="w-4 h-4" /></Link>
               </Button>
               <Button
                 type="button"
                 variant="outline"
                 size="lg"
                 className="border-border text-foreground hover:bg-accent gap-2"
-                onClick={() => { window.location.href = getLoginUrl(); }}
+                asChild
               >
-                <BarChart3 className="w-4 h-4" />
-                View Demo Report
+                <Link href="/login">
+                  <BarChart3 className="w-4 h-4" />
+                  View Demo Report
+                </Link>
               </Button>
             </div>
           </div>
@@ -244,9 +256,9 @@ export default function Home() {
             type="button"
             size="lg"
             className="bg-primary text-primary-foreground hover:bg-primary/90 gap-2"
-            onClick={() => { window.location.href = getLoginUrl(); }}
+            asChild
           >
-            Start Testing <ArrowRight className="w-4 h-4" />
+            <Link href="/login">Start Testing <ArrowRight className="w-4 h-4" /></Link>
           </Button>
         </div>
       </section>
