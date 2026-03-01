@@ -1,0 +1,14 @@
+- Nikto v2.6.0/
++ Target Host: graviteecustomer.info
++ Target Port: 443
++ GET /: Uncommon header(s) 'origin-agent-cluster' found, with contents: ?1.
++ SSL Info:           Subject:  /CN=graviteecustomer.info
+                      CN:       graviteecustomer.info
+                      SAN:      graviteecustomer.info
+                      Ciphers:  TLS_AES_256_GCM_SHA384
+                      Issuer:   /C=US/O=Let's Encrypt/CN=E8
++ GET /.psql_history: This might be interesting.
++ GET /.htpasswd: Contains authorization information.
++ GET /.bash_history: A user's home directory may be set to the web root, the shell history was retrieved. This should not be accessible via the web.
++ GET /.mysql_history: Database SQL?.
++ GET /.sh_history: A user's home directory may be set to the web root, the shell history was retrieved. This should not be accessible via the web.
