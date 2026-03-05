@@ -22,6 +22,20 @@
       "when": 1772322170020,
       "tag": "0002_wakeful_pestilence",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1772708712016,
+      "tag": "0003_dear_madame_hydra",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1772709792131,
+      "tag": "0004_worthless_ares",
+      "breakpoints": true
     }
   ]
 }

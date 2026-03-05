@@ -1,10 +1,10 @@
-# PenTest Portal — EC2 / galaxy-api.tech deploy
+# PenTest Portal — EC2 / ghoststrike.tech deploy
 
 ## What’s in place
 
 - **MySQL**: Runs in Docker via `docker-compose` (image `mysql:8.0`). Started automatically at boot by `pentest-portal-mysql.service`.
 - **App**: Node.js app runs under systemd as `pentest-portal.service` (port 3000), starts after MySQL.
-- **Nginx**: Reverse proxy for `galaxy-api.tech` (and `www.galaxy-api.tech`):
+- **Nginx**: Reverse proxy for `ghoststrike.tech` (and `www.ghoststrike.tech`):
   - **HTTPS** on port 443 → `http://127.0.0.1:3000` (Let’s Encrypt certificate).
   - **HTTP** on port 80 redirects to HTTPS.
 - **Certbot**: Certificate auto-renewal via `certbot-renew.timer`.
@@ -41,7 +41,7 @@ Use dev mode when you want live reload (Vite HMR + tsx watch) and no manual buil
    sudo systemctl stop pentest-portal
    pnpm dev
    ```
-   Leave this terminal open; the server runs at http://localhost:3000 (nginx still proxies galaxy-api.tech to it).
+   Leave this terminal open; the server runs at http://localhost:3000 (nginx still proxies ghoststrike.tech to it).
 
 2. **Run dev in the background** (keeps running after you disconnect):
    ```bash
@@ -68,7 +68,7 @@ sudo systemctl restart pentest-portal
 
 ## Nginx proxy timeouts
 
-If scan pages show **504 Gateway Time-out** or **ERR_EMPTY_RESPONSE** while a scan is running, increase proxy timeouts in your nginx server block (e.g. in `/etc/nginx/conf.d/galaxy-api.conf`). Inside the `location /` block that has `proxy_pass http://127.0.0.1:3000`, add:
+If scan pages show **504 Gateway Time-out** or **ERR_EMPTY_RESPONSE** while a scan is running, increase proxy timeouts in your nginx server block (e.g. in `/etc/nginx/conf.d/ghoststrike.conf`). Inside the `location /` block that has `proxy_pass http://127.0.0.1:3000`, add:
 
 ```nginx
 proxy_connect_timeout 75s;
@@ -76,11 +76,11 @@ proxy_send_timeout 300s;
 proxy_read_timeout 300s;
 ```
 
-Then run `sudo nginx -t && sudo systemctl reload nginx`. The repo’s `deploy/nginx-galaxy-api.conf` includes these. (Certbot may have rewritten your file; re-add the timeouts after any certbot change.)
+Then run `sudo nginx -t && sudo systemctl reload nginx`. The repo’s `deploy/nginx-ghoststrike.conf` includes these. (Certbot may have rewritten your file; re-add the timeouts after any certbot change.)
 
 ## DNS and firewall
 
-- **DNS**: Point `galaxy-api.tech` (and optionally `www.galaxy-api.tech`) to this server’s **public IP** (current: **52.56.193.19**).
+- **DNS**: Point `ghoststrike.tech` (and optionally `www.ghoststrike.tech`) to this server’s **public IP** (current: **52.56.193.19**).
 - **Security group**: Allow **inbound TCP 80 and 443** so nginx can receive HTTP (redirect) and HTTPS traffic.
 
 ## Optional scan tools (full-mode comprehensiveness)

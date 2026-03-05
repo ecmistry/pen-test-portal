@@ -169,7 +169,7 @@ export default defineConfig({
   },
   server: {
     host: true,
-    allowedHosts: ["localhost", "127.0.0.1", "52.56.193.19", "galaxy-api.tech", "www.galaxy-api.tech"],
+    allowedHosts: ["localhost", "127.0.0.1", "52.56.193.19", "ghoststrike.tech", "www.ghoststrike.tech"],
     fs: {
       strict: true,
       deny: ["**/.*"],

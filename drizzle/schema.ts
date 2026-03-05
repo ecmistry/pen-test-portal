@@ -1,5 +1,6 @@
 import {
   boolean,
+  decimal,
   int,
   json,
   mysqlEnum,
@@ -63,6 +64,8 @@ export const scans = mysqlTable("scans", {
   completedAt: timestamp("completedAt"),
   errorMessage: text("errorMessage"),
   triggeredBy: mysqlEnum("triggeredBy", ["manual", "schedule"]).default("manual").notNull(),
+  scenarios: json("scenarios"),
+  trendSummary: json("trendSummary"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });
 
@@ -81,6 +84,14 @@ export const scanFindings = mysqlTable("scan_findings", {
   recommendation: text("recommendation"),
   cweId: varchar("cweId", { length: 20 }),
   owaspCategory: varchar("owaspCategory", { length: 100 }),
+  cvssVector: varchar("cvssVector", { length: 200 }),
+  cvssScore: decimal("cvssScore", { precision: 3, scale: 1 }),
+  remediationComplexity: varchar("remediationComplexity", { length: 20 }),
+  remediationPriority: varchar("remediationPriority", { length: 10 }),
+  businessImpact: json("businessImpact"),
+  attackTechniques: json("attackTechniques"),
+  iso27001Controls: json("iso27001Controls"),
+  poc: json("poc"),
   status: mysqlEnum("status", ["open", "acknowledged", "resolved", "false_positive"]).default("open").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });

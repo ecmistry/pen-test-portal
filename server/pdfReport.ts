@@ -6,6 +6,8 @@
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { ReportData } from "./reportGenerator";
+import type { BusinessImpact, AttackTechnique } from "./findingEnrichment";
+import type { AttackScenario, TrendSummary } from "./scanEngine";
 
 function riskLabel(score: number): string {
   if (score < 40) return "CRITICAL RISK";
@@ -120,23 +122,24 @@ export function generatePdfReport(data: ReportData): Buffer {
   if (findings.length === 0) {
     addParagraph("No vulnerabilities detected. The target passed all security checks for the selected test categories.");
   } else {
-    const severityOrder: Array<"critical" | "high" | "medium" | "low" | "info"> = ["critical", "high", "medium", "low", "info"];
     const body = findings.map((f, i) => [
       String(i + 1),
-      truncate(f.title, 50),
+      truncate(f.title, 45),
       f.severity.toUpperCase(),
-      truncate(f.category, 20),
+      f.cvssScore ? Number(f.cvssScore).toFixed(1) : "—",
+      (f as any).remediationPriority ?? "—",
+      truncate(f.category, 18),
       (f.status ?? "open").toUpperCase(),
     ]);
     autoTable(doc, {
       startY: y,
-      head: [["#", "Title", "Severity", "Category", "Status"]],
+      head: [["#", "Title", "Severity", "CVSS", "Priority", "Category", "Status"]],
       body,
       margin: { left: margin },
       theme: "grid",
-      headStyles: { fillColor: [66, 66, 66], fontSize: 8 },
-      bodyStyles: { fontSize: 8 },
-      columnStyles: { 0: { cellWidth: 8 }, 1: { cellWidth: 75 }, 2: { cellWidth: 20 }, 3: { cellWidth: 35 }, 4: { cellWidth: 22 } },
+      headStyles: { fillColor: [66, 66, 66], fontSize: 7 },
+      bodyStyles: { fontSize: 7 },
+      columnStyles: { 0: { cellWidth: 7 }, 1: { cellWidth: 58 }, 2: { cellWidth: 16 }, 3: { cellWidth: 12 }, 4: { cellWidth: 14 }, 5: { cellWidth: 30 }, 6: { cellWidth: 18 } },
       tableWidth: "wrap",
     });
     y = (doc as any).lastAutoTable.finalY + 8;
@@ -150,7 +153,7 @@ export function generatePdfReport(data: ReportData): Buffer {
   if (findings.length > 0) {
     addHeading("5. Detailed Findings", 12);
     for (const f of findings.slice(0, 30)) {
-      if (y > 260) {
+      if (y > 250) {
         doc.addPage();
         y = 18;
       }
@@ -160,7 +163,17 @@ export function generatePdfReport(data: ReportData): Buffer {
       y += 5;
       doc.setFont("helvetica", "normal");
       doc.setFontSize(9);
+      const meta: string[] = [];
+      if (f.cvssScore) meta.push(`CVSS: ${Number(f.cvssScore).toFixed(1)}`);
+      if ((f as any).remediationPriority) meta.push(`Priority: ${(f as any).remediationPriority}`);
+      if ((f as any).remediationComplexity) meta.push(`Complexity: ${(f as any).remediationComplexity}`);
+      if (f.cweId) meta.push(f.cweId);
+      const techniques = f.attackTechniques as AttackTechnique[] | null;
+      if (techniques?.length) meta.push(`ATT&CK: ${techniques.map((t) => t.techniqueId).join(", ")}`);
+      if (meta.length > 0) addParagraph(meta.join(" | "), 500);
       if (f.description) addParagraph(f.description, 400);
+      const bizImpact = f.businessImpact as BusinessImpact | null;
+      if (bizImpact) addParagraph(`Business Impact: Financial=${bizImpact.financial}, Operational=${bizImpact.operational}, Reputational=${bizImpact.reputational}, Legal=${bizImpact.legal}`, 400);
       if (f.recommendation) addParagraph("Recommendation: " + f.recommendation, 350);
       y += 3;
     }
@@ -177,17 +190,52 @@ export function generatePdfReport(data: ReportData): Buffer {
   addHeading("6. Recommendations", 12);
   addParagraph("Address critical and high findings immediately. Schedule weekly automated pen tests, integrate SAST into CI/CD, audit dependencies, and maintain an incident response plan.");
 
-  // 7. Standards & Appendix
+  // Attack Scenarios
+  const scenarios = scan.scenarios as AttackScenario[] | null;
+  if (scenarios && scenarios.length > 0) {
+    if (y > 250) { doc.addPage(); y = 18; }
+    addHeading("7. Attack Scenarios", 12);
+    autoTable(doc, {
+      startY: y,
+      head: [["ID", "Scenario", "Objective", "Likelihood", "Impact"]],
+      body: scenarios.map((s) => [s.id, s.title, truncate(s.objective, 40), s.likelihood, s.impact]),
+      margin: { left: margin },
+      theme: "grid",
+      headStyles: { fillColor: [66, 66, 66], fontSize: 8 },
+      bodyStyles: { fontSize: 8 },
+    });
+    y = (doc as any).lastAutoTable.finalY + 5;
+    for (const s of scenarios) {
+      if (y > 260) { doc.addPage(); y = 18; }
+      addParagraph(`${s.id}: ${s.title} — ${s.steps.map((st, i) => `Step ${i + 1}: ${st.findingTitle}`).join("; ")}`, 500);
+    }
+    y += 3;
+  }
+
+  // Trend Analysis
+  const trend = scan.trendSummary as TrendSummary | null;
+  if (trend) {
+    if (y > 250) { doc.addPage(); y = 18; }
+    const trendNum = scenarios && scenarios.length > 0 ? 8 : 7;
+    addHeading(`${trendNum}. Trend Analysis`, 12);
+    addParagraph(`Compared against previous scan #${trend.previousScanId} (${trend.previousScanDate}): ${trend.newFindings} new, ${trend.resolvedFindings} resolved, ${trend.persistingFindings} persisting.`);
+    if (trend.newItems.length > 0) addParagraph(`New: ${trend.newItems.join(", ")}`, 500);
+    if (trend.resolvedItems.length > 0) addParagraph(`Resolved: ${trend.resolvedItems.join(", ")}`, 500);
+    y += 3;
+  }
+
+  // Standards & Appendix
   if (y > 255) {
     doc.addPage();
     y = 18;
   }
-  addHeading("7. Standards Compliance", 12);
-  addParagraph("OWASP Top 10:2021 (A01, A02, A03, A05, A07). PTES phases 2–5. NIST SP 800-115. CWE Top 25. ISO/IEC 27001 A.14.");
+  const stdNum = (scenarios && scenarios.length > 0 ? 8 : 7) + (trend ? 1 : 0);
+  addHeading(`${stdNum}. Standards Compliance`, 12);
+  addParagraph("OWASP Top 10:2021 (A01, A02, A03, A05, A07). OWASP API Security Top 10:2023 (API1–API9). CVSSv3.1 scoring on every finding. MITRE ATT&CK technique mapping. PTES phases 2–5. NIST SP 800-115. CWE Top 25. ISO/IEC 27001 Annex A (A.9, A.10, A.12, A.14, A.18).");
   addHeading("Appendix A — Glossary", 12);
   doc.setFontSize(9);
-  doc.text("CWE: Common Weakness Enumeration. CVE: Common Vulnerabilities and Exposures. DAST: Dynamic Application Security Testing. OWASP: Open Web Application Security Project. PTES: Penetration Testing Execution Standard. XSS: Cross-Site Scripting. SQLi: SQL Injection. CORS: Cross-Origin Resource Sharing.", margin, y, { maxWidth: pageW - 2 * margin });
-  y += 20;
+  doc.text("CWE: Common Weakness Enumeration. CVE: Common Vulnerabilities and Exposures. CVSS: Common Vulnerability Scoring System (0.0-10.0). DAST: Dynamic Application Security Testing. MITRE ATT&CK: Adversarial Tactics, Techniques, and Common Knowledge. OWASP: Open Web Application Security Project. PTES: Penetration Testing Execution Standard. ISO 27001: Information Security Management System standard. XSS: Cross-Site Scripting. SQLi: SQL Injection. CORS: Cross-Origin Resource Sharing.", margin, y, { maxWidth: pageW - 2 * margin });
+  y += 25;
 
   const pageCount = doc.getNumberOfPages();
   doc.setPage(pageCount);

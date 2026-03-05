@@ -136,6 +136,24 @@ export async function getScansByTarget(targetId: number, limit = 50) {
   return db.select().from(scans).where(eq(scans.targetId, targetId)).orderBy(desc(scans.createdAt)).limit(limit);
 }
 
+export async function getPreviousCompletedScan(targetId: number, beforeScanId: number) {
+  const db = await getDb();
+  if (!db) return null;
+  const rows = await db
+    .select()
+    .from(scans)
+    .where(
+      and(
+        eq(scans.targetId, targetId),
+        eq(scans.status, "completed"),
+        sql`${scans.id} < ${beforeScanId}`
+      )
+    )
+    .orderBy(desc(scans.createdAt))
+    .limit(1);
+  return rows[0] ?? null;
+}
+
 export async function getAllScans(limit = 100) {
   const db = await getDb();
   if (!db) return [];

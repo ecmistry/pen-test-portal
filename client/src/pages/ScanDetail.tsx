@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { useEffect, useRef, useState } from "react";
 import { useParams, useLocation, Link } from "wouter";
 import {
-  AlertTriangle, CheckCircle, Clock, FileText, Loader2, RefreshCw, Shield, XCircle, ChevronDown, ChevronUp,
+  AlertTriangle, CheckCircle, Clock, ExternalLink, FileText, Loader2, RefreshCw, Shield, XCircle, ChevronDown, ChevronUp,
 } from "lucide-react";
 
 function StatusBadge({ status }: { status: string }) {
@@ -14,6 +14,35 @@ function StatusBadge({ status }: { status: string }) {
 
 function SeverityBadge({ severity }: { severity: string }) {
   return <span className={`badge-${severity}`}>{severity.toUpperCase()}</span>;
+}
+
+function CvssBadge({ score }: { score: string | null | undefined }) {
+  if (!score) return null;
+  const n = Number(score);
+  const color = n >= 9.0 ? "text-red-400 bg-red-950/50 border-red-800/40"
+    : n >= 7.0 ? "text-orange-400 bg-orange-950/50 border-orange-800/40"
+    : n >= 4.0 ? "text-yellow-400 bg-yellow-950/50 border-yellow-800/40"
+    : "text-blue-400 bg-blue-950/50 border-blue-800/40";
+  return (
+    <span className={`inline-flex items-center gap-1 text-xs font-mono font-semibold px-1.5 py-0.5 rounded border ${color}`}>
+      {n.toFixed(1)}
+    </span>
+  );
+}
+
+function PriorityBadge({ priority }: { priority: string | null | undefined }) {
+  if (!priority) return null;
+  const colors: Record<string, string> = {
+    P1: "text-red-300 bg-red-950/40",
+    P2: "text-orange-300 bg-orange-950/40",
+    P3: "text-yellow-300 bg-yellow-950/40",
+    P4: "text-slate-300 bg-slate-950/40",
+  };
+  return (
+    <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${colors[priority] ?? "text-slate-300 bg-slate-950/40"}`}>
+      {priority}
+    </span>
+  );
 }
 
 function ScoreDisplay({ score, riskLevel }: { score: number | null | undefined; riskLevel: string | null | undefined }) {
@@ -257,8 +286,15 @@ export default function ScanDetail() {
                           onClick={() => setExpandedFinding(expandedFinding === f.id ? null : f.id)}
                         >
                           <div className="flex-1 min-w-0">
-                            <div className="text-sm font-medium text-foreground">{f.title}</div>
-                            <div className="text-xs text-muted-foreground mt-0.5">{f.category}{f.cweId ? ` · ${f.cweId}` : ""}{f.owaspCategory ? ` · ${f.owaspCategory}` : ""}</div>
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="text-sm font-medium text-foreground">{f.title}</span>
+                              <CvssBadge score={f.cvssScore} />
+                              <PriorityBadge priority={f.remediationPriority} />
+                            </div>
+                            <div className="text-xs text-muted-foreground mt-0.5">
+                              {f.category}{f.cweId ? ` · ${f.cweId}` : ""}{f.owaspCategory ? ` · ${f.owaspCategory}` : ""}
+                              {f.remediationComplexity ? ` · ${f.remediationComplexity} complexity` : ""}
+                            </div>
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
                             <select
@@ -280,10 +316,52 @@ export default function ScanDetail() {
                         </div>
                         {expandedFinding === f.id && (
                           <div className="mt-4 space-y-3 text-sm">
+                            {/* CVSS & metadata row */}
+                            {(f.cvssVector || f.attackTechniques || f.iso27001Controls) && (
+                              <div className="flex flex-wrap gap-x-6 gap-y-2 text-xs text-muted-foreground bg-black/20 rounded-lg p-3">
+                                {f.cvssVector && (
+                                  <div><span className="font-medium text-foreground/70">CVSS:</span> <code className="text-foreground/60">{f.cvssVector}</code></div>
+                                )}
+                                {f.attackTechniques && Array.isArray(f.attackTechniques) && f.attackTechniques.length > 0 && (
+                                  <div className="flex items-center gap-1">
+                                    <span className="font-medium text-foreground/70">ATT&CK:</span>
+                                    {f.attackTechniques.map((t: any) => (
+                                      <a key={t.techniqueId} href={`https://attack.mitre.org/techniques/${t.techniqueId}/`} target="_blank" rel="noopener noreferrer" className="text-primary hover:text-primary/80 inline-flex items-center gap-0.5">
+                                        {t.techniqueId} <ExternalLink className="w-3 h-3" />
+                                      </a>
+                                    ))}
+                                  </div>
+                                )}
+                                {f.iso27001Controls && Array.isArray(f.iso27001Controls) && f.iso27001Controls.length > 0 && (
+                                  <div><span className="font-medium text-foreground/70">ISO 27001:</span> {f.iso27001Controls.join(", ")}</div>
+                                )}
+                              </div>
+                            )}
                             {f.description && (
                               <div>
                                 <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Description</div>
                                 <p className="text-foreground/80">{f.description}</p>
+                              </div>
+                            )}
+                            {/* Business Impact */}
+                            {f.businessImpact && typeof f.businessImpact === "object" && (
+                              <div>
+                                <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Business Impact</div>
+                                <div className="grid grid-cols-4 gap-2 mt-1">
+                                  {(["financial", "operational", "reputational", "legal"] as const).map((dim) => {
+                                    const val = (f.businessImpact as any)[dim];
+                                    const c = val === "High" || val === "Critical" ? "text-red-400" : val === "Medium" ? "text-yellow-400" : "text-blue-400";
+                                    return (
+                                      <div key={dim} className="bg-black/30 rounded p-2 text-center">
+                                        <div className="text-[10px] text-muted-foreground uppercase">{dim}</div>
+                                        <div className={`text-xs font-semibold ${c}`}>{val}</div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                                {(f.businessImpact as any).rationale && (
+                                  <p className="text-xs text-muted-foreground mt-1.5 italic">{(f.businessImpact as any).rationale}</p>
+                                )}
                               </div>
                             )}
                             {f.evidence && (
@@ -298,6 +376,39 @@ export default function ScanDetail() {
                                 <p className="text-emerald-400/90">{f.recommendation}</p>
                               </div>
                             )}
+                            {f.poc && typeof f.poc === "object" && (
+                              <div>
+                                <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Proof of Concept</div>
+                                {(f.poc as any).curlCommand && (
+                                  <div className="mb-2">
+                                    <div className="text-[10px] text-muted-foreground mb-0.5">curl command</div>
+                                    <pre className="text-xs bg-black/40 text-amber-400 rounded p-2 overflow-x-auto font-mono">{(f.poc as any).curlCommand}</pre>
+                                  </div>
+                                )}
+                                {(f.poc as any).requestRaw && (
+                                  <div className="mb-2">
+                                    <div className="text-[10px] text-muted-foreground mb-0.5">Raw HTTP request</div>
+                                    <pre className="text-xs bg-black/40 text-slate-300 rounded p-2 overflow-x-auto font-mono whitespace-pre-wrap">{(f.poc as any).requestRaw}</pre>
+                                  </div>
+                                )}
+                                {(f.poc as any).responseSnippet && (
+                                  <div className="mb-2">
+                                    <div className="text-[10px] text-muted-foreground mb-0.5">Response snippet</div>
+                                    <pre className="text-xs bg-black/40 text-green-400 rounded p-2 overflow-x-auto font-mono">{(f.poc as any).responseSnippet}</pre>
+                                  </div>
+                                )}
+                                {(f.poc as any).reproductionSteps && Array.isArray((f.poc as any).reproductionSteps) && (
+                                  <div>
+                                    <div className="text-[10px] text-muted-foreground mb-0.5">Reproduction steps</div>
+                                    <ul className="text-xs text-foreground/80 space-y-0.5">
+                                      {(f.poc as any).reproductionSteps.map((s: string, i: number) => (
+                                        <li key={i}>{s}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         )}
                       </div>
@@ -306,6 +417,87 @@ export default function ScanDetail() {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {/* Attack Scenarios */}
+        {scan.status === "completed" && (scan as any).scenarios && Array.isArray((scan as any).scenarios) && (scan as any).scenarios.length > 0 && (
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-foreground flex items-center gap-2">
+              <Shield className="w-5 h-5 text-red-400" />
+              Attack Scenarios ({(scan as any).scenarios.length})
+            </h3>
+            <div className="bg-card border border-border rounded-xl overflow-hidden divide-y divide-border/50">
+              {(scan as any).scenarios.map((s: any) => (
+                <div key={s.id} className="px-5 py-4">
+                  <div className="flex items-center gap-3 mb-2">
+                    <span className="text-xs font-mono text-muted-foreground">{s.id}</span>
+                    <span className="text-sm font-medium text-foreground">{s.title}</span>
+                    <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${s.impact === "High" ? "text-red-300 bg-red-950/40" : s.impact === "Medium" ? "text-yellow-300 bg-yellow-950/40" : "text-blue-300 bg-blue-950/40"}`}>
+                      {s.impact} Impact
+                    </span>
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${s.likelihood === "High" ? "text-red-300 bg-red-950/30" : s.likelihood === "Medium" ? "text-yellow-300 bg-yellow-950/30" : "text-blue-300 bg-blue-950/30"}`}>
+                      {s.likelihood} Likelihood
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mb-2">Objective: {s.objective}</p>
+                  <div className="flex flex-wrap gap-2">
+                    {s.steps.map((step: any, i: number) => (
+                      <div key={i} className="flex items-center gap-1.5 text-xs">
+                        <span className="w-5 h-5 rounded-full bg-primary/20 text-primary flex items-center justify-center font-bold text-[10px]">{i + 1}</span>
+                        <span className="text-foreground/80">{step.findingTitle}</span>
+                        {i < s.steps.length - 1 && <span className="text-muted-foreground mx-1">→</span>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Trend Analysis */}
+        {scan.status === "completed" && (scan as any).trendSummary && typeof (scan as any).trendSummary === "object" && (
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-foreground flex items-center gap-2">
+              <Clock className="w-5 h-5 text-blue-400" />
+              Trend Analysis
+            </h3>
+            <div className="bg-card border border-border rounded-xl p-5">
+              <p className="text-sm text-muted-foreground mb-3">
+                Compared against scan #{(scan as any).trendSummary.previousScanId} ({(scan as any).trendSummary.previousScanDate})
+              </p>
+              <div className="grid grid-cols-3 gap-4 mb-4">
+                <div className="bg-black/20 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold text-red-400">{(scan as any).trendSummary.newFindings}</div>
+                  <div className="text-xs text-muted-foreground">New</div>
+                </div>
+                <div className="bg-black/20 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold text-emerald-400">{(scan as any).trendSummary.resolvedFindings}</div>
+                  <div className="text-xs text-muted-foreground">Resolved</div>
+                </div>
+                <div className="bg-black/20 rounded-lg p-3 text-center">
+                  <div className="text-2xl font-bold text-yellow-400">{(scan as any).trendSummary.persistingFindings}</div>
+                  <div className="text-xs text-muted-foreground">Persisting</div>
+                </div>
+              </div>
+              {(scan as any).trendSummary.newItems?.length > 0 && (
+                <div className="mb-2">
+                  <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">New Findings</div>
+                  {(scan as any).trendSummary.newItems.map((t: string, i: number) => (
+                    <div key={i} className="text-xs text-red-400/80">+ {t}</div>
+                  ))}
+                </div>
+              )}
+              {(scan as any).trendSummary.resolvedItems?.length > 0 && (
+                <div className="mb-2">
+                  <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Resolved</div>
+                  {(scan as any).trendSummary.resolvedItems.map((t: string, i: number) => (
+                    <div key={i} className="text-xs text-emerald-400/80">- {t}</div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 

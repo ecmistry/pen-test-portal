@@ -14,9 +14,13 @@ const mockDb = vi.hoisted(() => {
 
 vi.mock("./db", () => mockDb);
 
-vi.mock("./scanEngine", () => ({
-  runScan: vi.fn().mockResolvedValue(undefined),
-}));
+vi.mock("./scanEngine", async (importOriginal) => {
+  const actual = await importOriginal() as Record<string, unknown>;
+  return {
+    ...actual,
+    runScan: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 vi.mock("./penTestUpdater", () => ({
   getPenTestCache: vi.fn(),
@@ -73,6 +77,8 @@ const mockScan = {
   completedAt: new Date(),
   errorMessage: null,
   triggeredBy: "manual" as const,
+  scenarios: null,
+  trendSummary: null,
   createdAt: new Date(),
 };
 
@@ -333,5 +339,268 @@ describe("reports.getDemoReportPdf (public)", () => {
     expect(result.title).toBeDefined();
     expect(result.pdfBase64).toBeDefined();
     expect(Buffer.from(result.pdfBase64, "base64").subarray(0, 5).toString("ascii")).toBe("%PDF-");
+  });
+});
+
+// ─── auth.logout ─────────────────────────────────────────────────────────────
+
+describe("auth.logout", () => {
+  it("returns { success: true } and clears cookie", async () => {
+    const clearCookieSpy = vi.fn();
+    const ctx = {
+      user: null,
+      req: { protocol: "https", headers: {} } as any,
+      res: { clearCookie: clearCookieSpy } as any,
+    };
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.auth.logout();
+    expect(result).toEqual({ success: true });
+    expect(clearCookieSpy).toHaveBeenCalled();
+  });
+});
+
+// ─── targets CRUD ────────────────────────────────────────────────────────────
+
+describe("targets.create", () => {
+  it("creates target and returns success", async () => {
+    vi.mocked(db.createTarget).mockResolvedValueOnce(undefined as any);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.targets.create({
+      name: "New Target",
+      url: "https://new-example.com",
+    });
+    expect(result).toEqual({ success: true });
+    expect(db.createTarget).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "New Target",
+        url: "https://new-example.com",
+        userId: 1,
+      }),
+    );
+  });
+});
+
+describe("targets.update", () => {
+  it("updates target when user owns it", async () => {
+    vi.mocked(db.getTargetById).mockResolvedValueOnce(mockTarget);
+    vi.mocked(db.updateTarget).mockResolvedValueOnce(undefined as any);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.targets.update({ id: 10, name: "Updated Name" });
+    expect(result).toEqual({ success: true });
+    expect(db.updateTarget).toHaveBeenCalledWith(10, { name: "Updated Name" });
+  });
+
+  it("throws FORBIDDEN when non-owner tries to update", async () => {
+    const otherUserTarget = { ...mockTarget, userId: 999 };
+    vi.mocked(db.getTargetById).mockResolvedValueOnce(otherUserTarget);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.targets.update({ id: 10, name: "Hacked" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("throws NOT_FOUND when target does not exist", async () => {
+    vi.mocked(db.getTargetById).mockResolvedValueOnce(undefined);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.targets.update({ id: 999, name: "Ghost" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("targets.delete", () => {
+  it("deletes target when user owns it", async () => {
+    vi.mocked(db.getTargetById).mockResolvedValueOnce(mockTarget);
+    vi.mocked(db.deleteTarget).mockResolvedValueOnce(undefined as any);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.targets.delete({ id: 10 });
+    expect(result).toEqual({ success: true });
+    expect(db.deleteTarget).toHaveBeenCalledWith(10);
+  });
+
+  it("throws FORBIDDEN when non-owner tries to delete", async () => {
+    vi.mocked(db.getTargetById).mockResolvedValueOnce({ ...mockTarget, userId: 999 });
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.targets.delete({ id: 10 })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("throws NOT_FOUND when target does not exist", async () => {
+    vi.mocked(db.getTargetById).mockResolvedValueOnce(undefined);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.targets.delete({ id: 999 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+// ─── Ownership: admin access to other user's resources ──────────────────────
+
+describe("assertOwnerOrAdmin — admin override", () => {
+  it("admin can access another user's target", async () => {
+    vi.mocked(db.getTargetById).mockResolvedValueOnce(mockTarget);
+    const ctx = createContext(mockAdminUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.targets.get({ id: 10 });
+    expect(result?.id).toBe(10);
+  });
+
+  it("admin can access another user's scan", async () => {
+    vi.mocked(db.getScanById).mockResolvedValueOnce(mockScan);
+    const ctx = createContext(mockAdminUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.scans.get({ id: 100 });
+    expect(result?.id).toBe(100);
+  });
+
+  it("non-owner non-admin throws FORBIDDEN on target get", async () => {
+    const otherUserTarget = { ...mockTarget, userId: 999 };
+    vi.mocked(db.getTargetById).mockResolvedValueOnce(otherUserTarget);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.targets.get({ id: 10 })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("non-owner non-admin throws FORBIDDEN on scan get", async () => {
+    const otherUserScan = { ...mockScan, userId: 999 };
+    vi.mocked(db.getScanById).mockResolvedValueOnce(otherUserScan);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.scans.get({ id: 100 })).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+});
+
+// ─── scans.updateFinding ─────────────────────────────────────────────────────
+
+describe("scans.updateFinding", () => {
+  it("updates finding status and returns success", async () => {
+    vi.mocked(db.updateFindingStatus).mockResolvedValueOnce(undefined as any);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.scans.updateFinding({ findingId: 1, status: "resolved" });
+    expect(result).toEqual({ success: true });
+    expect(db.updateFindingStatus).toHaveBeenCalledWith(1, "resolved");
+  });
+
+  it("allows status false_positive", async () => {
+    vi.mocked(db.updateFindingStatus).mockResolvedValueOnce(undefined as any);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.scans.updateFinding({ findingId: 2, status: "false_positive" });
+    expect(result).toEqual({ success: true });
+  });
+
+  it("allows status acknowledged", async () => {
+    vi.mocked(db.updateFindingStatus).mockResolvedValueOnce(undefined as any);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.scans.updateFinding({ findingId: 3, status: "acknowledged" });
+    expect(result).toEqual({ success: true });
+  });
+});
+
+// ─── scans.recentFindings ────────────────────────────────────────────────────
+
+describe("scans.recentFindings", () => {
+  it("returns recent findings for user", async () => {
+    vi.mocked(db.getRecentFindingsByUser).mockResolvedValueOnce([]);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.scans.recentFindings();
+    expect(result).toEqual([]);
+    expect(db.getRecentFindingsByUser).toHaveBeenCalledWith(1, 20);
+  });
+});
+
+// ─── reports.generate ────────────────────────────────────────────────────────
+
+describe("reports.generate", () => {
+  it("throws BAD_REQUEST when scan is not completed", async () => {
+    const runningScan = { ...mockScan, status: "running" as const };
+    vi.mocked(db.getScanById).mockResolvedValueOnce(runningScan);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.reports.generate({ scanId: 100 })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
+
+  it("returns existing reportId if report already exists", async () => {
+    vi.mocked(db.getScanById).mockResolvedValueOnce(mockScan);
+    vi.mocked(db.getTargetById).mockResolvedValueOnce(mockTarget);
+    vi.mocked(db.getFindingsByScan).mockResolvedValueOnce([]);
+    vi.mocked(db.getReportByScan).mockResolvedValueOnce({ id: 42 } as any);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.reports.generate({ scanId: 100 });
+    expect(result).toEqual({ reportId: 42, success: true });
+  });
+
+  it("creates new report when none exists", async () => {
+    vi.mocked(db.getScanById).mockResolvedValueOnce(mockScan);
+    vi.mocked(db.getTargetById).mockResolvedValueOnce(mockTarget);
+    vi.mocked(db.getFindingsByScan).mockResolvedValueOnce([]);
+    vi.mocked(db.getReportByScan).mockResolvedValueOnce(undefined);
+    vi.mocked(db.createReport).mockResolvedValueOnce(55 as any);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.reports.generate({ scanId: 100 });
+    expect(result).toEqual({ reportId: 55, success: true });
+    expect(db.createReport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scanId: 100,
+        userId: 1,
+      }),
+    );
+  });
+
+  it("throws NOT_FOUND when scan does not exist", async () => {
+    vi.mocked(db.getScanById).mockResolvedValueOnce(undefined);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.reports.generate({ scanId: 999 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+// ─── reports.getMarkdown / getPDF / getJSON ─────────────────────────────────
+
+describe("reports.getMarkdown", () => {
+  it("throws NOT_FOUND when report not generated", async () => {
+    vi.mocked(db.getScanById).mockResolvedValueOnce(mockScan);
+    vi.mocked(db.getReportByScan).mockResolvedValueOnce(undefined);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.reports.getMarkdown({ scanId: 100 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("reports.getPDF", () => {
+  it("throws NOT_FOUND when report not generated", async () => {
+    vi.mocked(db.getScanById).mockResolvedValueOnce(mockScan);
+    vi.mocked(db.getReportByScan).mockResolvedValueOnce(undefined);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.reports.getPDF({ scanId: 100 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("reports.getJSON", () => {
+  it("throws NOT_FOUND when report not generated", async () => {
+    vi.mocked(db.getScanById).mockResolvedValueOnce(mockScan);
+    vi.mocked(db.getReportByScan).mockResolvedValueOnce(undefined);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    await expect(caller.reports.getJSON({ scanId: 100 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+// ─── dashboard.trends ────────────────────────────────────────────────────────
+
+describe("dashboard.trends", () => {
+  it("returns scan trends for user", async () => {
+    vi.mocked(db.getScanTrends).mockResolvedValueOnce([]);
+    const ctx = createContext(mockUser);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.dashboard.trends({ days: 30 });
+    expect(result).toEqual([]);
+    expect(db.getScanTrends).toHaveBeenCalledWith(1, false, 30);
   });
 });
