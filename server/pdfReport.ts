@@ -7,7 +7,8 @@ import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import type { ReportData } from "./reportGenerator";
 import type { BusinessImpact, AttackTechnique } from "./findingEnrichment";
-import type { AttackScenario, TrendSummary } from "./scanEngine";
+import type { AttackScenario, TrendSummary, ScanAuthMeta } from "./scanEngine";
+import { getToolAuthCapabilities } from "./scanEngine";
 
 function riskLabel(score: number): string {
   if (score < 40) return "CRITICAL RISK";
@@ -58,6 +59,36 @@ export function generatePdfReport(data: ReportData): Buffer {
     y += lines.length * 5 + 3;
   };
 
+  const authMeta = (scan as any).authMeta as ScanAuthMeta | null;
+  const isAuthenticated = authMeta?.authMode === "authenticated" || (scan as any).authMode === "authenticated";
+
+  // Auth mode banner — colour-coded strip across the page
+  if (isAuthenticated) {
+    doc.setFillColor(34, 139, 34); // green
+    doc.rect(0, y - 5, pageW, 10, "F");
+    doc.setFontSize(11);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(255, 255, 255);
+    doc.text("AUTHENTICATED SCAN", margin, y + 2);
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "normal");
+    const methodLabel = authMeta?.authMethod ? ` | Method: ${authMeta.authMethod.replace(/-/g, " ")}` : "";
+    const roleLabel = authMeta?.authRole ? ` | Role: ${authMeta.authRole}` : "";
+    doc.text(`Full application surface (post-login)${methodLabel}${roleLabel}`, pageW / 2, y + 2);
+  } else {
+    doc.setFillColor(255, 140, 0); // orange
+    doc.rect(0, y - 5, pageW, 10, "F");
+    doc.setFontSize(11);
+    doc.setFont("helvetica", "bold");
+    doc.setTextColor(255, 255, 255);
+    doc.text("UNAUTHENTICATED SCAN", margin, y + 2);
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "normal");
+    doc.text("External surface only — post-login surfaces not tested", pageW / 2, y + 2);
+  }
+  doc.setTextColor(0, 0, 0);
+  y += 12;
+
   // Title
   doc.setFontSize(18);
   doc.setFont("helvetica", "bold");
@@ -70,12 +101,13 @@ export function generatePdfReport(data: ReportData): Buffer {
   y += 5;
   doc.text(`Target: ${target.name} — ${target.url}`, margin, y);
   y += 5;
-  doc.text(`Scan ID: ${scan.id}  |  Triggered by: ${scan.triggeredBy === "schedule" ? "Scheduled" : "Manual"}`, margin, y);
+  doc.text(`Scan ID: ${scan.id}  |  Auth: ${isAuthenticated ? "Authenticated" : "Unauthenticated"}  |  Triggered by: ${scan.triggeredBy === "schedule" ? "Scheduled" : "Manual"}`, margin, y);
   y += 10;
 
   // 1. Scope of Work
   addHeading("1. Scope of Work", 12);
-  addParagraph(`In scope: ${target.name} (${target.url}). Assessment type: Automated penetration test (DAST). Test domains: ${tools.join(", ")}. Scan mode: ${scan.scanMode ?? "light"}.`);
+  const coverageLabel = isAuthenticated ? "Full application surface (post-login)" : "External surface only";
+  addParagraph(`In scope: ${target.name} (${target.url}). Assessment type: Automated penetration test (DAST). Test domains: ${tools.join(", ")}. Scan mode: ${scan.scanMode ?? "light"}. Authentication: ${isAuthenticated ? "Authenticated" : "Unauthenticated"}. Coverage: ${coverageLabel}.`);
   addParagraph("Out of scope: Manual penetration testing, social engineering, code review (SAST), and systems not explicitly included as the target URL.");
   y += 5;
 
@@ -88,26 +120,41 @@ export function generatePdfReport(data: ReportData): Buffer {
     low: findings.filter((f) => f.severity === "low"),
     info: findings.filter((f) => f.severity === "info"),
   };
+  const summaryBody: string[][] = [
+    ["Authentication Mode", isAuthenticated ? "Authenticated" : "Unauthenticated"],
+    ["Coverage Depth", isAuthenticated ? "Full application surface (post-login)" : "External surface only"],
+    ["Security Score", `${score}/100`],
+    ["Risk Level", riskLabel(score)],
+    ["Total Findings", String(findings.length)],
+    ["Critical", String(bySeverity.critical.length)],
+    ["High", String(bySeverity.high.length)],
+    ["Medium", String(bySeverity.medium.length)],
+    ["Low", String(bySeverity.low.length)],
+    ["Informational", String(bySeverity.info.length)],
+  ];
+  if (isAuthenticated) {
+    const postAuth = findings.filter((f) => (f as any).authContext === "post-auth").length;
+    const preAuth = findings.filter((f) => (f as any).authContext === "pre-auth").length;
+    summaryBody.push(["Pre-auth findings", String(preAuth)]);
+    summaryBody.push(["Post-auth findings", String(postAuth)]);
+  }
   autoTable(doc, {
     startY: y,
     head: [["Metric", "Value"]],
-    body: [
-      ["Security Score", `${score}/100`],
-      ["Risk Level", riskLabel(score)],
-      ["Total Findings", String(findings.length)],
-      ["Critical", String(bySeverity.critical.length)],
-      ["High", String(bySeverity.high.length)],
-      ["Medium", String(bySeverity.medium.length)],
-      ["Low", String(bySeverity.low.length)],
-      ["Informational", String(bySeverity.info.length)],
-    ],
+    body: summaryBody,
     margin: { left: margin },
     theme: "grid",
-    headStyles: { fillColor: [66, 66, 66] },
+    headStyles: { fillColor: isAuthenticated ? [34, 139, 34] : [255, 140, 0] },
   });
   y = (doc as any).lastAutoTable.finalY + 8;
   if (bySeverity.critical.length > 0 || bySeverity.high.length > 0) {
     addParagraph("Business risk: Critical and high severity findings may expose the organisation to data breach, regulatory penalties, or service compromise.");
+  }
+  if (isAuthenticated) {
+    const postAuthCount = findings.filter((f) => (f as any).authContext === "post-auth").length;
+    if (postAuthCount === 0 && findings.length > 0) {
+      addParagraph("WARNING: Authenticated scan produced no additional findings beyond unauthenticated baseline — verify credentials were valid and session was maintained throughout the scan.");
+    }
   }
   addParagraph(score < 60 ? "Immediate action required to address critical and high severity vulnerabilities." : score < 80 ? "Security improvements recommended." : "Good security posture. Continue monitoring and address remaining findings.");
   y += 5;
@@ -115,12 +162,52 @@ export function generatePdfReport(data: ReportData): Buffer {
   // 3. Test Coverage
   addHeading("3. Test Coverage", 12);
   addParagraph(`Test domains assessed: ${tools.map((t) => t.toUpperCase()).join(", ")}.`);
+  if (isAuthenticated) {
+    const caps = getToolAuthCapabilities(tools);
+    autoTable(doc, {
+      startY: y,
+      head: [["Tool", "Auth Support", "Note"]],
+      body: caps.map((c) => [c.tool.toUpperCase(), c.authSupport === "full" ? "Full" : c.authSupport === "limited" ? "Limited" : "None", truncate(c.note, 60)]),
+      margin: { left: margin },
+      theme: "grid",
+      headStyles: { fillColor: [34, 139, 34], fontSize: 7 },
+      bodyStyles: { fontSize: 7 },
+    });
+    y = (doc as any).lastAutoTable.finalY + 5;
+    const gaps = caps.filter((c) => c.authSupport !== "full");
+    if (gaps.length > 0) {
+      addParagraph(`Coverage gaps: ${gaps.map((g) => g.tool.toUpperCase()).join(", ")} do not fully support authenticated scanning.`);
+    }
+  }
   y += 5;
 
   // 4. Findings Summary
   addHeading("4. Findings Summary", 12);
   if (findings.length === 0) {
     addParagraph("No vulnerabilities detected. The target passed all security checks for the selected test categories.");
+  } else if (isAuthenticated) {
+    const body = findings.map((f, i) => [
+      String(i + 1),
+      truncate(f.title, 40),
+      f.severity.toUpperCase(),
+      f.cvssScore ? Number(f.cvssScore).toFixed(1) : "—",
+      (f as any).remediationPriority ?? "—",
+      truncate(f.category, 16),
+      (f as any).authContext === "post-auth" ? "Post-auth" : (f as any).authContext === "pre-auth" ? "Pre-auth" : "—",
+      (f.status ?? "open").toUpperCase(),
+    ]);
+    autoTable(doc, {
+      startY: y,
+      head: [["#", "Title", "Severity", "CVSS", "Priority", "Category", "Auth", "Status"]],
+      body,
+      margin: { left: margin },
+      theme: "grid",
+      headStyles: { fillColor: [34, 139, 34], fontSize: 7 },
+      bodyStyles: { fontSize: 7 },
+      columnStyles: { 0: { cellWidth: 6 }, 1: { cellWidth: 48 }, 2: { cellWidth: 14 }, 3: { cellWidth: 10 }, 4: { cellWidth: 12 }, 5: { cellWidth: 22 }, 6: { cellWidth: 16 }, 7: { cellWidth: 14 } },
+      tableWidth: "wrap",
+    });
+    y = (doc as any).lastAutoTable.finalY + 8;
   } else {
     const body = findings.map((f, i) => [
       String(i + 1),
@@ -137,7 +224,7 @@ export function generatePdfReport(data: ReportData): Buffer {
       body,
       margin: { left: margin },
       theme: "grid",
-      headStyles: { fillColor: [66, 66, 66], fontSize: 7 },
+      headStyles: { fillColor: [255, 140, 0], fontSize: 7 },
       bodyStyles: { fontSize: 7 },
       columnStyles: { 0: { cellWidth: 7 }, 1: { cellWidth: 58 }, 2: { cellWidth: 16 }, 3: { cellWidth: 12 }, 4: { cellWidth: 14 }, 5: { cellWidth: 30 }, 6: { cellWidth: 18 } },
       tableWidth: "wrap",

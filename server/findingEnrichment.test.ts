@@ -1007,3 +1007,143 @@ describe("deriveApiSecurityCategory — SSRF", () => {
     expect(result).toEqual({ id: "API7:2023", name: "Server Side Request Forgery" });
   });
 });
+
+// ─── deriveApiSecurityCategory — additional mappings ─────────────────────────
+
+describe("deriveApiSecurityCategory — additional mappings", () => {
+  it("maps SQL injection category to API3:2023", () => {
+    const result = deriveApiSecurityCategory("sql injection", null);
+    expect(result).toEqual({ id: "API3:2023", name: "Broken Object Property Level Authorization" });
+  });
+
+  it("maps CORS to API8:2023", () => {
+    const result = deriveApiSecurityCategory("cors", null);
+    expect(result).toEqual({ id: "API8:2023", name: "Security Misconfiguration" });
+  });
+
+  it("maps CWE-269 to API1:2023 (BOLA)", () => {
+    const result = deriveApiSecurityCategory("Authorization", "CWE-269");
+    expect(result).toEqual({ id: "API1:2023", name: "Broken Object Level Authorization" });
+  });
+
+  it("maps CWE-284 to API5:2023 (Broken Function Level Authorization)", () => {
+    const result = deriveApiSecurityCategory("Authorization", "CWE-284");
+    expect(result).toEqual({ id: "API5:2023", name: "Broken Function Level Authorization" });
+  });
+
+  it("maps CWE-502 to API10:2023 (Unsafe Consumption)", () => {
+    const result = deriveApiSecurityCategory("SCA", "CWE-502");
+    expect(result).toEqual({ id: "API10:2023", name: "Unsafe Consumption of APIs" });
+  });
+
+  it("maps CWE-1104 to API10:2023", () => {
+    const result = deriveApiSecurityCategory("SCA", "CWE-1104");
+    expect(result).toEqual({ id: "API10:2023", name: "Unsafe Consumption of APIs" });
+  });
+
+  it("maps information disclosure to API9:2023", () => {
+    const result = deriveApiSecurityCategory("information disclosure", null);
+    expect(result).toEqual({ id: "API9:2023", name: "Improper Inventory Management" });
+  });
+
+  it("maps business logic to API6:2023", () => {
+    const result = deriveApiSecurityCategory("business logic", null);
+    expect(result).toEqual({ id: "API6:2023", name: "Unrestricted Access to Sensitive Business Flows" });
+  });
+
+  it("maps graphql to API4:2023", () => {
+    const result = deriveApiSecurityCategory("graphql", null);
+    expect(result).toEqual({ id: "API4:2023", name: "Unrestricted Resource Consumption" });
+  });
+
+  it("returns null for unknown category without CWE", () => {
+    const result = deriveApiSecurityCategory("Unknown Category", null);
+    expect(result).toBeNull();
+  });
+
+  it("CWE takes precedence over category mapping", () => {
+    const result = deriveApiSecurityCategory("cors", "CWE-307");
+    expect(result).toEqual({ id: "API2:2023", name: "Broken Authentication" });
+  });
+});
+
+// ─── enrichFinding — additional edge cases ───────────────────────────────────
+
+describe("enrichFinding — additional edge cases", () => {
+  it("returns undefined CVSS for unknown category and unknown CWE", () => {
+    const result = enrichFinding("Unknown Category 999", "medium", "CWE-99999");
+    expect(result.cvss).toBeUndefined();
+  });
+
+  it("handles empty string category", () => {
+    const result = enrichFinding("", "low", null);
+    expect(result).toBeDefined();
+    expect(result.cvss).toBeUndefined();
+  });
+
+  it("returns correct remediation priority for info severity", () => {
+    const result = enrichFinding("Security Headers", "info", "CWE-693");
+    expect(result.remediationPriority).toBeNull();
+  });
+
+  it("returns different business impact for critical vs low severity", () => {
+    const critical = enrichFinding("SQL Injection", "critical", "CWE-89");
+    const low = enrichFinding("Information Disclosure", "low", "CWE-200");
+    expect(critical.businessImpact?.financial).not.toBe(low.businessImpact?.financial);
+  });
+
+  it("enriches TLS category correctly", () => {
+    const result = enrichFinding("TLS", "medium", "CWE-326");
+    expect(result.cvss).not.toBeNull();
+    expect(result.iso27001Controls).toContain("A.10.1.1");
+    expect(result.attackTechniques?.[0].techniqueId).toBe("T1557");
+  });
+
+  it("enriches GraphQL category correctly", () => {
+    const result = enrichFinding("GraphQL", "medium", "CWE-200");
+    expect(result.iso27001Controls).toContain("A.14.2.5");
+  });
+
+  it("enriches Nikto tool findings", () => {
+    const result = enrichFinding("Nikto", "medium", null);
+    expect(result.iso27001Controls).toContain("A.12.6.1");
+  });
+
+  it("enriches OWASP ZAP tool findings", () => {
+    const result = enrichFinding("owasp zap", "medium", null);
+    expect(result.iso27001Controls).toContain("A.14.2.8");
+  });
+});
+
+// ─── getIso27001ControlTitle — edge cases ────────────────────────────────────
+
+describe("getIso27001ControlTitle — edge cases", () => {
+  it("returns title for A.9.4.1", () => {
+    expect(getIso27001ControlTitle("A.9.4.1")).toBe("Information access restriction");
+  });
+
+  it("returns title for A.9.4.2", () => {
+    expect(getIso27001ControlTitle("A.9.4.2")).toBe("Secure log-on procedures");
+  });
+
+  it("returns title for A.10.1.1", () => {
+    expect(getIso27001ControlTitle("A.10.1.1")).toBe("Policy on the use of cryptographic controls");
+  });
+
+  it("returns title for A.18.1.4", () => {
+    expect(getIso27001ControlTitle("A.18.1.4")).toBe("Privacy and protection of PII");
+  });
+
+  it("returns the control ID itself for unknown control", () => {
+    expect(getIso27001ControlTitle("A.99.99.99")).toBe("A.99.99.99");
+  });
+
+  it("returns all 10 control titles", () => {
+    const controls = ["A.9.4.1", "A.9.4.2", "A.9.4.3", "A.10.1.1", "A.12.5.1", "A.12.6.1", "A.14.1.2", "A.14.2.5", "A.14.2.8", "A.18.1.4"];
+    for (const ctrl of controls) {
+      const title = getIso27001ControlTitle(ctrl);
+      expect(title).not.toBe(ctrl);
+      expect(title.length).toBeGreaterThan(5);
+    }
+  });
+});

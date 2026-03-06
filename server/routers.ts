@@ -36,7 +36,7 @@ import {
 import type { Scan, ScanFinding, Target } from "../drizzle/schema";
 import { generateExecutiveSummary, generateJSONReport, generateMarkdownReport } from "./reportGenerator";
 import { generatePdfReport } from "./pdfReport";
-import { runScan, analyzeAttackScenarios, type AuthScanConfig } from "./scanEngine";
+import { runScan, analyzeAttackScenarios, type AuthScanConfig, type LoginCredentials } from "./scanEngine";
 import { pushFindingsToTicketing, type IntegrationsConfig, type TicketResult } from "./ticketingIntegration";
 import { getPenTestCache, updatePenTestCapabilities } from "./penTestUpdater";
 import { enrichFinding } from "./findingEnrichment";
@@ -57,6 +57,8 @@ function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFindin
     status: "completed",
     tools: "headers,auth,sqli,xss,recon",
     scanMode: "full",
+    authMode: null,
+    authMeta: null,
     securityScore: 78,
     riskLevel: "medium",
     totalFindings: 3,
@@ -105,6 +107,7 @@ function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFindin
       attackTechniques: enriched.attackTechniques,
       iso27001Controls: enriched.iso27001Controls,
       poc: null,
+      authContext: null,
       status: "open" as const,
       createdAt: new Date(),
     };
@@ -236,6 +239,14 @@ export const appRouter = router({
             tokenReuse: z.boolean().optional(),
           }).optional(),
           manifestPath: z.string().optional(),
+          loginCredentials: z.object({
+            loginUrl: z.string().url(),
+            username: z.string(),
+            password: z.string(),
+            usernameField: z.string().optional(),
+            passwordField: z.string().optional(),
+            loginMethod: z.enum(["form", "json"]).optional(),
+          }).optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -256,9 +267,10 @@ export const appRouter = router({
         const authConfig: AuthScanConfig | undefined =
           input.authProfiles ? { authProfiles: input.authProfiles, authTests: input.authTests } : undefined;
 
-        // Run scan asynchronously (non-blocking)
+        const loginCreds: LoginCredentials | undefined = input.loginCredentials;
+
         setImmediate(() => {
-          runScan(scanId, target.id, target.url, input.tools, input.scanMode, authConfig, input.manifestPath).catch(console.error);
+          runScan(scanId, target.id, target.url, input.tools, input.scanMode, authConfig, input.manifestPath, loginCreds).catch(console.error);
         });
 
         return { scanId, success: true };

@@ -5,11 +5,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { useState } from "react";
 import { useLocation } from "wouter";
 import {
-  Plus, Target, Edit2, Trash2, Play, Clock, CheckCircle, XCircle, ExternalLink,
+  Plus, Target, Edit2, Trash2, Play, Clock, ExternalLink, Lock,
 } from "lucide-react";
 
 function StatusDot({ isActive }: { isActive: boolean }) {
@@ -32,6 +33,26 @@ const defaultForm: TargetFormData = {
   description: "",
   tags: "",
   scanFrequency: "manual",
+};
+
+interface AuthScanForm {
+  loginUrl: string;
+  username: string;
+  password: string;
+  usernameField: string;
+  passwordField: string;
+  loginMethod: "form" | "json";
+  scanMode: "light" | "full";
+}
+
+const defaultAuthForm: AuthScanForm = {
+  loginUrl: "",
+  username: "",
+  password: "",
+  usernameField: "username",
+  passwordField: "password",
+  loginMethod: "json",
+  scanMode: "full",
 };
 
 export default function Targets() {
@@ -65,6 +86,7 @@ export default function Targets() {
   const startScanMutation = trpc.scans.start.useMutation({
     onSuccess: (data) => {
       toast.success("Scan started!");
+      setAuthScanTarget(null);
       navigate(`/scans/${data.scanId}`);
     },
     onError: (e) => toast.error(e.message),
@@ -74,6 +96,9 @@ export default function Targets() {
   const [editTarget, setEditTarget] = useState<any>(null);
   const [form, setForm] = useState<TargetFormData>(defaultForm);
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null);
+  const [authScanTarget, setAuthScanTarget] = useState<any>(null);
+  const [authForm, setAuthForm] = useState<AuthScanForm>(defaultAuthForm);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   function openEdit(t: any) {
     setEditTarget(t);
@@ -86,6 +111,15 @@ export default function Targets() {
     });
   }
 
+  function openAuthScan(t: any) {
+    setAuthScanTarget(t);
+    setAuthForm({
+      ...defaultAuthForm,
+      loginUrl: t.url.replace(/\/$/, ""),
+    });
+    setShowAdvanced(false);
+  }
+
   function handleSubmit() {
     if (!form.name || !form.url) {
       toast.error("Name and URL are required");
@@ -96,6 +130,30 @@ export default function Targets() {
     } else {
       createMutation.mutate(form);
     }
+  }
+
+  function handleAuthScan() {
+    if (!authForm.username || !authForm.password) {
+      toast.error("Username and password are required");
+      return;
+    }
+    if (!authForm.loginUrl) {
+      toast.error("Login URL is required");
+      return;
+    }
+    startScanMutation.mutate({
+      targetId: authScanTarget.id,
+      tools: ["headers", "auth", "sqli", "xss", "recon"],
+      scanMode: authForm.scanMode,
+      loginCredentials: {
+        loginUrl: authForm.loginUrl,
+        username: authForm.username,
+        password: authForm.password,
+        usernameField: authForm.usernameField || "username",
+        passwordField: authForm.passwordField || "password",
+        loginMethod: authForm.loginMethod,
+      },
+    });
   }
 
   return (
@@ -235,6 +293,17 @@ export default function Targets() {
                   </div>
                   <Button
                     size="sm"
+                    variant="outline"
+                    className="w-full border-cyan-500/50 text-cyan-500 hover:bg-cyan-500/10 hover:text-cyan-400 gap-1.5"
+                    onClick={() => openAuthScan(t)}
+                    disabled={startScanMutation.isPending}
+                    title="Run a scan with login credentials for authenticated testing"
+                  >
+                    <Lock className="w-3.5 h-3.5" />
+                    Authenticated Scan
+                  </Button>
+                  <Button
+                    size="sm"
                     variant="ghost"
                     className="w-full text-muted-foreground hover:text-foreground"
                     onClick={() => navigate(`/scans?targetId=${t.id}`)}
@@ -316,6 +385,132 @@ export default function Targets() {
               disabled={createMutation.isPending || updateMutation.isPending}
             >
               {editTarget ? "Save Changes" : "Add Target"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Authenticated Scan Dialog */}
+      <Dialog open={!!authScanTarget} onOpenChange={(o) => { if (!o) setAuthScanTarget(null); }}>
+        <DialogContent className="bg-card border-border text-foreground max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Lock className="w-4 h-4 text-cyan-500" />
+              Authenticated Scan
+            </DialogTitle>
+          </DialogHeader>
+          {authScanTarget && (
+            <div className="space-y-4 py-2">
+              <div className="text-xs text-muted-foreground bg-accent/50 rounded-lg px-3 py-2">
+                Target: <span className="text-foreground font-medium">{authScanTarget.name}</span>
+                <span className="text-muted-foreground ml-1">({authScanTarget.url})</span>
+              </div>
+
+              <div>
+                <Label className="text-foreground text-sm mb-1.5 block">Login URL *</Label>
+                <Input
+                  placeholder="https://example.com/login"
+                  value={authForm.loginUrl}
+                  onChange={(e) => setAuthForm({ ...authForm, loginUrl: e.target.value })}
+                  className="bg-input border-border text-foreground placeholder:text-muted-foreground"
+                />
+                <p className="text-xs text-muted-foreground mt-1">The URL where the login form or API endpoint is located</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-foreground text-sm mb-1.5 block">Username *</Label>
+                  <Input
+                    placeholder="admin"
+                    value={authForm.username}
+                    onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })}
+                    className="bg-input border-border text-foreground placeholder:text-muted-foreground"
+                    autoComplete="off"
+                  />
+                </div>
+                <div>
+                  <Label className="text-foreground text-sm mb-1.5 block">Password *</Label>
+                  <Input
+                    type="password"
+                    placeholder="••••••••"
+                    value={authForm.password}
+                    onChange={(e) => setAuthForm({ ...authForm, password: e.target.value })}
+                    className="bg-input border-border text-foreground placeholder:text-muted-foreground"
+                    autoComplete="off"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label className="text-foreground text-sm mb-1.5 block">Scan Mode</Label>
+                  <Select value={authForm.scanMode} onValueChange={(v: any) => setAuthForm({ ...authForm, scanMode: v })}>
+                    <SelectTrigger className="bg-input border-border text-foreground">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-card border-border text-foreground">
+                      <SelectItem value="light">Light</SelectItem>
+                      <SelectItem value="full">Full</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label className="text-foreground text-sm mb-1.5 block">Login Method</Label>
+                  <Select value={authForm.loginMethod} onValueChange={(v: any) => setAuthForm({ ...authForm, loginMethod: v })}>
+                    <SelectTrigger className="bg-input border-border text-foreground">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent className="bg-card border-border text-foreground">
+                      <SelectItem value="json">JSON (API)</SelectItem>
+                      <SelectItem value="form">Form POST</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between">
+                <Label className="text-foreground text-sm">Advanced Options</Label>
+                <Switch checked={showAdvanced} onCheckedChange={setShowAdvanced} />
+              </div>
+
+              {showAdvanced && (
+                <div className="grid grid-cols-2 gap-3 border border-border/50 rounded-lg p-3 bg-accent/30">
+                  <div>
+                    <Label className="text-muted-foreground text-xs mb-1 block">Username Field</Label>
+                    <Input
+                      placeholder="username"
+                      value={authForm.usernameField}
+                      onChange={(e) => setAuthForm({ ...authForm, usernameField: e.target.value })}
+                      className="bg-input border-border text-foreground placeholder:text-muted-foreground text-sm h-8"
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-muted-foreground text-xs mb-1 block">Password Field</Label>
+                    <Input
+                      placeholder="password"
+                      value={authForm.passwordField}
+                      onChange={(e) => setAuthForm({ ...authForm, passwordField: e.target.value })}
+                      className="bg-input border-border text-foreground placeholder:text-muted-foreground text-sm h-8"
+                    />
+                  </div>
+                  <p className="col-span-2 text-xs text-muted-foreground">
+                    Field names used in the login request body (e.g. "email" instead of "username")
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" className="border-border text-foreground" onClick={() => setAuthScanTarget(null)}>
+              Cancel
+            </Button>
+            <Button
+              className="bg-cyan-600 text-white hover:bg-cyan-700 gap-1.5"
+              onClick={handleAuthScan}
+              disabled={startScanMutation.isPending}
+            >
+              <Lock className="w-3.5 h-3.5" />
+              {startScanMutation.isPending ? "Starting..." : "Start Authenticated Scan"}
             </Button>
           </DialogFooter>
         </DialogContent>

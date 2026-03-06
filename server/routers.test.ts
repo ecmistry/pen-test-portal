@@ -65,6 +65,8 @@ const mockScan = {
   status: "completed" as const,
   tools: "headers,auth,sqli,xss",
   scanMode: "light" as const,
+  authMode: null as string | null,
+  authMeta: null as unknown,
   securityScore: 85,
   riskLevel: "low" as const,
   totalFindings: 2,

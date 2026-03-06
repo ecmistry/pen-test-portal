@@ -24,12 +24,22 @@ export async function getDb() {
   if (!_db && process.env.DATABASE_URL) {
     try {
       _db = drizzle(process.env.DATABASE_URL);
+      await applyLightMigrations(_db);
     } catch (error) {
       console.warn("[Database] Failed to connect:", error);
       _db = null;
     }
   }
   return _db;
+}
+
+async function applyLightMigrations(db: ReturnType<typeof drizzle>) {
+  const safeAlter = async (statement: string) => {
+    try { await db.execute(sql.raw(statement)); } catch { /* column likely exists */ }
+  };
+  await safeAlter("ALTER TABLE scans ADD COLUMN authMode VARCHAR(20) DEFAULT NULL");
+  await safeAlter("ALTER TABLE scans ADD COLUMN authMeta JSON DEFAULT NULL");
+  await safeAlter("ALTER TABLE scan_findings ADD COLUMN authContext VARCHAR(20) DEFAULT NULL");
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────────

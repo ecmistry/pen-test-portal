@@ -52,6 +52,8 @@ export const scans = mysqlTable("scans", {
   status: mysqlEnum("status", ["queued", "running", "completed", "failed", "cancelled"]).default("queued").notNull(),
   tools: varchar("tools", { length: 500 }).notNull().default("headers,auth,sqli,xss"),
   scanMode: varchar("scanMode", { length: 20 }).default("light").notNull(),
+  authMode: varchar("authMode", { length: 20 }),
+  authMeta: json("authMeta"),
   securityScore: int("securityScore"),
   riskLevel: mysqlEnum("riskLevel", ["critical", "high", "medium", "low", "info"]),
   totalFindings: int("totalFindings").default(0),
@@ -92,6 +94,7 @@ export const scanFindings = mysqlTable("scan_findings", {
   attackTechniques: json("attackTechniques"),
   iso27001Controls: json("iso27001Controls"),
   poc: json("poc"),
+  authContext: varchar("authContext", { length: 20 }),
   status: mysqlEnum("status", ["open", "acknowledged", "resolved", "false_positive"]).default("open").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });

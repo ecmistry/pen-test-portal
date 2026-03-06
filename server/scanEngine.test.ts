@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { analyzeAttackScenarios, computeTrend, calculateScore, isSpaFallback, hasFileSpecificContent, buildAuthHeader, profilePrivilegeRank, parseOsvOutput, parseTrivyOutput, scaVulnsToFindings, type AttackScenario, type TrendSummary, type AuthProfile, type ScaDependencyVuln } from "./scanEngine";
+import { describe, it, expect, vi } from "vitest";
+import { analyzeAttackScenarios, computeTrend, calculateScore, isSpaFallback, hasFileSpecificContent, buildAuthHeader, profilePrivilegeRank, parseOsvOutput, parseTrivyOutput, scaVulnsToFindings, performLogin, extractCookies, mergeCookies, isNiktoMetadataLine, getToolAuthCapabilities, testURLNormalisationBypass, type AttackScenario, type TrendSummary, type AuthProfile, type ScaDependencyVuln, type LoginCredentials, type ScanAuthMeta } from "./scanEngine";
 
 describe("analyzeAttackScenarios", () => {
   it("returns empty array when no findings", () => {
@@ -686,5 +686,470 @@ describe("scaVulnsToFindings", () => {
     const findings = scaVulnsToFindings(vulns, "PyPI");
     expect(findings[0].description).toContain("No fixed version available");
     expect(findings[0].recommendation).toContain("alternative packages");
+  });
+});
+
+// ─── extractCookies ──────────────────────────────────────────────────────────
+
+describe("extractCookies", () => {
+  it("returns empty string when no set-cookie header", () => {
+    expect(extractCookies({})).toBe("");
+    expect(extractCookies({ "content-type": "text/html" })).toBe("");
+  });
+
+  it("extracts a single cookie (strips attributes)", () => {
+    const headers = { "set-cookie": "session=abc123; Path=/; HttpOnly" };
+    expect(extractCookies(headers)).toBe("session=abc123");
+  });
+
+  it("extracts multiple cookies from array", () => {
+    const headers = { "set-cookie": ["session=abc123; Path=/", "csrftoken=xyz; Secure"] as any };
+    const result = extractCookies(headers);
+    expect(result).toContain("session=abc123");
+    expect(result).toContain("csrftoken=xyz");
+    expect(result).toBe("session=abc123; csrftoken=xyz");
+  });
+
+  it("handles undefined values in array gracefully", () => {
+    const headers = { "set-cookie": [undefined, "a=1; Path=/"] as any };
+    expect(extractCookies(headers)).toBe("a=1");
+  });
+});
+
+// ─── mergeCookies ────────────────────────────────────────────────────────────
+
+describe("mergeCookies", () => {
+  it("merges two disjoint cookie strings", () => {
+    const result = mergeCookies("a=1", "b=2");
+    expect(result).toContain("a=1");
+    expect(result).toContain("b=2");
+  });
+
+  it("overwrites cookies with same name", () => {
+    const result = mergeCookies("session=old", "session=new");
+    expect(result).toBe("session=new");
+    expect(result).not.toContain("old");
+  });
+
+  it("handles empty strings", () => {
+    expect(mergeCookies("", "a=1")).toBe("a=1");
+    expect(mergeCookies("a=1", "")).toBe("a=1");
+    expect(mergeCookies("", "")).toBe("");
+  });
+
+  it("preserves multiple cookies with overwrites", () => {
+    const result = mergeCookies("a=1; b=2; c=3", "b=updated; d=4");
+    expect(result).toContain("a=1");
+    expect(result).toContain("b=updated");
+    expect(result).toContain("c=3");
+    expect(result).toContain("d=4");
+    expect(result).not.toContain("b=2");
+  });
+});
+
+// ─── LoginCredentials type ────────────────────────────────────────────────────
+
+describe("LoginCredentials type", () => {
+  it("has the expected shape", () => {
+    const creds: LoginCredentials = {
+      loginUrl: "https://example.com/login",
+      username: "admin",
+      password: "secret",
+      usernameField: "email",
+      passwordField: "pass",
+      loginMethod: "json",
+    };
+    expect(creds.loginUrl).toBe("https://example.com/login");
+    expect(creds.loginMethod).toBe("json");
+  });
+
+  it("allows optional fields to be undefined", () => {
+    const creds: LoginCredentials = {
+      loginUrl: "https://example.com/login",
+      username: "admin",
+      password: "secret",
+    };
+    expect(creds.usernameField).toBeUndefined();
+    expect(creds.passwordField).toBeUndefined();
+    expect(creds.loginMethod).toBeUndefined();
+  });
+});
+
+// ─── extractCookies edge cases ───────────────────────────────────────────────
+
+describe("extractCookies — edge cases", () => {
+  it("strips Path, Domain, Secure, HttpOnly attributes", () => {
+    const result = extractCookies({ "set-cookie": "sid=abc; Path=/; Domain=.example.com; Secure; HttpOnly" });
+    expect(result).toBe("sid=abc");
+  });
+
+  it("handles cookie with = in value", () => {
+    const result = extractCookies({ "set-cookie": "token=abc=def==; Path=/" });
+    expect(result).toBe("token=abc=def==");
+  });
+
+  it("handles set-cookie with empty string", () => {
+    const result = extractCookies({ "set-cookie": "" });
+    expect(result).toBe("");
+  });
+});
+
+// ─── mergeCookies edge cases ─────────────────────────────────────────────────
+
+describe("mergeCookies — edge cases", () => {
+  it("handles cookie with = in value", () => {
+    const result = mergeCookies("token=abc=123", "session=xyz");
+    expect(result).toContain("token=abc=123");
+    expect(result).toContain("session=xyz");
+  });
+
+  it("handles single cookie without value", () => {
+    const result = mergeCookies("flagonly", "a=1");
+    expect(result).toContain("flagonly");
+    expect(result).toContain("a=1");
+  });
+
+  it("overwrites when merging same name with different values", () => {
+    const result = mergeCookies("a=1; b=2", "a=new; c=3");
+    expect(result).toContain("a=new");
+    expect(result).toContain("b=2");
+    expect(result).toContain("c=3");
+    expect(result).not.toContain("a=1");
+  });
+});
+
+// ─── parseOsvOutput edge cases ───────────────────────────────────────────────
+
+describe("parseOsvOutput — edge cases", () => {
+  it("handles multiple vulnerabilities for same package", () => {
+    const output = JSON.stringify({
+      results: [{
+        source: { path: "package.json" },
+        packages: [{
+          package: { name: "lodash", version: "4.17.15" },
+          vulnerabilities: [
+            { id: "CVE-2020-8203", summary: "Prototype Pollution", database_specific: { severity: "HIGH" } },
+            { id: "CVE-2021-23337", summary: "Command Injection", database_specific: { severity: "CRITICAL" } },
+          ],
+        }],
+      }],
+    });
+    const vulns = parseOsvOutput(output);
+    expect(vulns).toHaveLength(2);
+    expect(vulns[0].cve).toBe("CVE-2020-8203");
+    expect(vulns[1].cve).toBe("CVE-2021-23337");
+    expect(vulns[1].severity).toBe("critical");
+  });
+
+  it("handles multiple packages in results", () => {
+    const output = JSON.stringify({
+      results: [{
+        source: { path: "package.json" },
+        packages: [
+          { package: { name: "express", version: "4.17.0" }, vulnerabilities: [{ id: "CVE-2024-1111", summary: "XSS", database_specific: { severity: "MEDIUM" } }] },
+          { package: { name: "axios", version: "0.21.0" }, vulnerabilities: [{ id: "CVE-2024-2222", summary: "SSRF", database_specific: { severity: "HIGH" } }] },
+        ],
+      }],
+    });
+    const vulns = parseOsvOutput(output);
+    expect(vulns).toHaveLength(2);
+    expect(vulns[0].package).toBe("express");
+    expect(vulns[1].package).toBe("axios");
+  });
+
+  it("handles empty results array", () => {
+    const vulns = parseOsvOutput(JSON.stringify({ results: [] }));
+    expect(vulns).toEqual([]);
+  });
+});
+
+// ─── parseTrivyOutput edge cases ─────────────────────────────────────────────
+
+describe("parseTrivyOutput — edge cases", () => {
+  it("handles multiple Results entries", () => {
+    const output = JSON.stringify({
+      Results: [
+        {
+          Target: "package.json",
+          Vulnerabilities: [{ VulnerabilityID: "CVE-2024-0001", PkgName: "a", InstalledVersion: "1.0", FixedVersion: "1.1", Severity: "HIGH", Title: "Bug A" }],
+        },
+        {
+          Target: "go.mod",
+          Vulnerabilities: [{ VulnerabilityID: "CVE-2024-0002", PkgName: "b", InstalledVersion: "2.0", FixedVersion: "2.1", Severity: "LOW", Title: "Bug B" }],
+        },
+      ],
+    });
+    const vulns = parseTrivyOutput(output);
+    expect(vulns).toHaveLength(2);
+    expect(vulns[0].package).toBe("a");
+    expect(vulns[1].package).toBe("b");
+  });
+
+  it("handles empty Results array", () => {
+    const vulns = parseTrivyOutput(JSON.stringify({ Results: [] }));
+    expect(vulns).toEqual([]);
+  });
+
+  it("handles null Vulnerabilities in a Result", () => {
+    const output = JSON.stringify({
+      Results: [{ Target: "package.json", Vulnerabilities: null }],
+    });
+    const vulns = parseTrivyOutput(output);
+    expect(vulns).toEqual([]);
+  });
+});
+
+// ─── scaVulnsToFindings edge cases ───────────────────────────────────────────
+
+describe("scaVulnsToFindings — edge cases", () => {
+  it("returns empty array for empty vulns", () => {
+    expect(scaVulnsToFindings([], "npm")).toEqual([]);
+  });
+
+  it("handles different ecosystem names", () => {
+    const vulns: ScaDependencyVuln[] = [{
+      package: "django",
+      installedVersion: "3.2.0",
+      fixedVersion: "3.2.1",
+      cve: "CVE-2024-9999",
+      severity: "medium",
+      summary: "XSS flaw",
+    }];
+    const findings = scaVulnsToFindings(vulns, "PyPI");
+    expect(findings[0].title).toContain("django");
+    expect(findings[0].title).toContain("CVE-2024-9999");
+    expect(findings[0].description).toContain("PyPI");
+  });
+
+  it("produces multiple findings for multiple vulns", () => {
+    const vulns: ScaDependencyVuln[] = [
+      { package: "a", installedVersion: "1.0", fixedVersion: "1.1", cve: "CVE-1", severity: "high", summary: "X" },
+      { package: "b", installedVersion: "2.0", fixedVersion: "2.1", cve: "CVE-2", severity: "low", summary: "Y" },
+      { package: "c", installedVersion: "3.0", fixedVersion: null, cve: "CVE-3", severity: "critical", summary: "Z" },
+    ];
+    const findings = scaVulnsToFindings(vulns, "npm");
+    expect(findings).toHaveLength(3);
+    expect(findings[0].severity).toBe("high");
+    expect(findings[2].severity).toBe("critical");
+  });
+});
+
+// ─── calculateScore edge cases ───────────────────────────────────────────────
+
+describe("calculateScore — additional edge cases", () => {
+  it("caps deductions at maxCount per severity", () => {
+    const manyHighs = Array.from({ length: 20 }, () => ({ severity: "high" as const }));
+    const result = calculateScore(manyHighs);
+    expect(result.score).toBeGreaterThanOrEqual(0);
+  });
+
+  it("returns info risk level for score 100", () => {
+    const result = calculateScore([]);
+    expect(result.score).toBe(100);
+    expect(result.riskLevel).toBe("info");
+  });
+
+  it("never goes below 0", () => {
+    const extreme = [
+      ...Array.from({ length: 10 }, () => ({ severity: "critical" as const })),
+      ...Array.from({ length: 10 }, () => ({ severity: "high" as const })),
+    ];
+    const result = calculateScore(extreme);
+    expect(result.score).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// ─── computeTrend edge cases ─────────────────────────────────────────────────
+
+describe("computeTrend — additional edge cases", () => {
+  it("all findings are resolved (none persist)", () => {
+    const previous = [
+      { title: "Old Bug", category: "Auth", severity: "high" },
+    ];
+    const current = [] as { title: string; category: string; severity: string }[];
+    const trend = computeTrend(current, previous, { id: 1, completedAt: new Date() });
+    expect(trend.resolvedFindings).toBe(1);
+    expect(trend.newFindings).toBe(0);
+    expect(trend.persistingFindings).toBe(0);
+  });
+
+  it("all findings are new (none existed before)", () => {
+    const current = [
+      { title: "New Bug A", category: "XSS", severity: "medium" },
+      { title: "New Bug B", category: "SQLi", severity: "high" },
+    ];
+    const previous = [] as { title: string; category: string; severity: string }[];
+    const trend = computeTrend(current, previous, { id: 1, completedAt: new Date() });
+    expect(trend.newFindings).toBe(2);
+    expect(trend.resolvedFindings).toBe(0);
+    expect(trend.persistingFindings).toBe(0);
+  });
+
+  it("captures previousAuthMode from previous scan", () => {
+    const trend = computeTrend([], [], { id: 5, completedAt: new Date(), authMode: "authenticated" });
+    expect(trend.previousAuthMode).toBe("authenticated");
+  });
+
+  it("previousAuthMode is undefined when previous scan has no authMode", () => {
+    const trend = computeTrend([], [], { id: 5, completedAt: new Date() });
+    expect(trend.previousAuthMode).toBeUndefined();
+  });
+});
+
+// ─── isNiktoMetadataLine ─────────────────────────────────────────────────────
+
+describe("isNiktoMetadataLine", () => {
+  it("identifies Target IP line", () => {
+    expect(isNiktoMetadataLine("+ Target IP: 1.2.3.4")).toBe(true);
+  });
+
+  it("identifies Target Hostname line", () => {
+    expect(isNiktoMetadataLine("+ Target Hostname: example.com")).toBe(true);
+  });
+
+  it("identifies Target Port line", () => {
+    expect(isNiktoMetadataLine("+ Target Port: 443")).toBe(true);
+  });
+
+  it("identifies Start Time line", () => {
+    expect(isNiktoMetadataLine("+ Start Time: 2025-01-01 10:00:00")).toBe(true);
+  });
+
+  it("identifies End Time line", () => {
+    expect(isNiktoMetadataLine("+ End Time: 2025-01-01 10:05:00")).toBe(true);
+  });
+
+  it("identifies SSL Info line", () => {
+    expect(isNiktoMetadataLine("+ SSL Info: Subject: /CN=example.com")).toBe(true);
+  });
+
+  it("identifies Server line", () => {
+    expect(isNiktoMetadataLine("+ Server: Apache/2.4.41")).toBe(true);
+  });
+
+  it("identifies hosts tested line", () => {
+    expect(isNiktoMetadataLine("+ 1 host(s) tested")).toBe(true);
+  });
+
+  it("identifies Nikto version line", () => {
+    expect(isNiktoMetadataLine("+ Nikto v2.5.0")).toBe(true);
+  });
+
+  it("identifies separator line", () => {
+    expect(isNiktoMetadataLine("+ ---------------------------------------------------------------------------")).toBe(true);
+  });
+
+  it("does NOT classify OSVDB finding as metadata", () => {
+    expect(isNiktoMetadataLine("+ OSVDB-3092: /admin/: This might be interesting.")).toBe(false);
+  });
+
+  it("does NOT classify general finding as metadata", () => {
+    expect(isNiktoMetadataLine("+ /login.php: A login page was found.")).toBe(false);
+  });
+});
+
+// ─── getToolAuthCapabilities ─────────────────────────────────────────────────
+
+describe("getToolAuthCapabilities", () => {
+  it("returns full support for headers", () => {
+    const caps = getToolAuthCapabilities(["headers"]);
+    expect(caps).toHaveLength(1);
+    expect(caps[0].authSupport).toBe("full");
+  });
+
+  it("returns limited support for nikto", () => {
+    const caps = getToolAuthCapabilities(["nikto"]);
+    expect(caps[0].authSupport).toBe("limited");
+  });
+
+  it("returns none for tls", () => {
+    const caps = getToolAuthCapabilities(["tls"]);
+    expect(caps[0].authSupport).toBe("none");
+  });
+
+  it("returns none for sca", () => {
+    const caps = getToolAuthCapabilities(["sca"]);
+    expect(caps[0].authSupport).toBe("none");
+  });
+
+  it("handles multiple tools", () => {
+    const caps = getToolAuthCapabilities(["headers", "nikto", "zap", "tls"]);
+    expect(caps).toHaveLength(4);
+    expect(caps[0].authSupport).toBe("full");
+    expect(caps[1].authSupport).toBe("limited");
+    expect(caps[2].authSupport).toBe("full");
+    expect(caps[3].authSupport).toBe("none");
+  });
+
+  it("handles unknown tool", () => {
+    const caps = getToolAuthCapabilities(["unknown"]);
+    expect(caps[0].authSupport).toBe("none");
+  });
+});
+
+// ─── ScanAuthMeta type ───────────────────────────────────────────────────────
+
+describe("ScanAuthMeta type", () => {
+  it("accepts minimal authenticated metadata", () => {
+    const meta: ScanAuthMeta = { authMode: "authenticated" };
+    expect(meta.authMode).toBe("authenticated");
+    expect(meta.authMethod).toBeUndefined();
+  });
+
+  it("accepts full authenticated metadata", () => {
+    const meta: ScanAuthMeta = {
+      authMode: "authenticated",
+      authMethod: "bearer-token",
+      authRole: "admin",
+      loginUrl: "https://example.com/login",
+      authenticatedEndpointsTested: 15,
+      totalEndpointsTested: 20,
+    };
+    expect(meta.authMode).toBe("authenticated");
+    expect(meta.authMethod).toBe("bearer-token");
+    expect(meta.authenticatedEndpointsTested).toBe(15);
+  });
+});
+
+// ─── getToolAuthCapabilities — new PEN-* tools ────────────────────────────
+
+describe("getToolAuthCapabilities — PEN-derived tools", () => {
+  it("returns full support for ai-prompt", () => {
+    const caps = getToolAuthCapabilities(["ai-prompt"]);
+    expect(caps[0].authSupport).toBe("full");
+    expect(caps[0].tool).toBe("ai-prompt");
+  });
+
+  it("returns full support for secret-leak", () => {
+    const caps = getToolAuthCapabilities(["secret-leak"]);
+    expect(caps[0].authSupport).toBe("full");
+  });
+
+  it("returns full support for url-norm", () => {
+    const caps = getToolAuthCapabilities(["url-norm"]);
+    expect(caps[0].authSupport).toBe("full");
+  });
+
+  it("returns full support for http-client", () => {
+    const caps = getToolAuthCapabilities(["http-client"]);
+    expect(caps[0].authSupport).toBe("full");
+  });
+});
+
+// ─── testURLNormalisationBypass ───────────────────────────────────────────
+
+vi.mock("./db", () => ({
+  appendScanLog: vi.fn().mockResolvedValue(undefined),
+  createFindings: vi.fn().mockResolvedValue(undefined),
+  updateScan: vi.fn().mockResolvedValue(undefined),
+  updateTarget: vi.fn().mockResolvedValue(undefined),
+  getPreviousCompletedScan: vi.fn().mockResolvedValue(null),
+  getFindingsByScan: vi.fn().mockResolvedValue([]),
+}));
+
+describe("testURLNormalisationBypass", () => {
+  it("returns empty findings when target is unreachable", async () => {
+    const findings = await testURLNormalisationBypass(999, "http://127.0.0.1:1");
+    expect(findings).toEqual([]);
   });
 });

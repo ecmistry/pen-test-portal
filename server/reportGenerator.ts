@@ -6,7 +6,8 @@
 
 import { ScanFinding, Scan, Target } from "../drizzle/schema";
 import { getIso27001ControlTitle, deriveApiSecurityCategory, type BusinessImpact, type AttackTechnique, type ApiSecurityMapping } from "./findingEnrichment";
-import type { AttackScenario, TrendSummary } from "./scanEngine";
+import type { AttackScenario, TrendSummary, ScanAuthMeta, ToolAuthCapability } from "./scanEngine";
+import { getToolAuthCapabilities } from "./scanEngine";
 
 export interface ReportData {
   scan: Scan;
@@ -90,7 +91,19 @@ export function generateMarkdownReport(data: ReportData): string {
     info: findings.filter((f) => f.severity === "info"),
   };
 
+  const authMeta = (scan as any).authMeta as ScanAuthMeta | null;
+  const isAuthenticated = authMeta?.authMode === "authenticated" || (scan as any).authMode === "authenticated";
+  const authModeValue = isAuthenticated ? "authenticated" : "unauthenticated";
+
   const lines: string[] = [];
+
+  // ── Auth Mode Banner ──
+  if (isAuthenticated) {
+    lines.push(`> 🟢 **AUTHENTICATED SCAN** — This assessment was performed with valid credentials, covering post-login application surfaces.`);
+  } else {
+    lines.push(`> 🟠 **UNAUTHENTICATED SCAN** — This assessment was performed without credentials, covering the external attack surface only.`);
+  }
+  lines.push(``);
 
   // ── Title & Document Control ──
   lines.push(`# Penetration Test Report`);
@@ -101,6 +114,11 @@ export function generateMarkdownReport(data: ReportData): string {
   lines.push(`| Generated | ${generatedAt.toUTCString()} |`);
   lines.push(`| Scan ID | ${scan.id} |`);
   lines.push(`| Target | ${target.name} — ${target.url} |`);
+  lines.push(`| Authentication Mode | **${isAuthenticated ? "Authenticated" : "Unauthenticated"}** |`);
+  if (isAuthenticated && authMeta) {
+    if (authMeta.authMethod) lines.push(`| Authentication Method | ${authMeta.authMethod.replace(/-/g, " ")} |`);
+    if (authMeta.authRole) lines.push(`| Authenticated User / Role | ${authMeta.authRole} |`);
+  }
   lines.push(`| Triggered by | ${scan.triggeredBy === "schedule" ? "Scheduled" : "Manual"} |`);
   lines.push(`| Duration | ${scan.startedAt && scan.completedAt ? Math.round((scan.completedAt.getTime() - scan.startedAt.getTime()) / 1000) + "s" : "N/A"} |`);
   lines.push(``);
@@ -116,11 +134,23 @@ export function generateMarkdownReport(data: ReportData): string {
   lines.push(`- **Assessment type:** Automated penetration test (DAST / vulnerability scanning)`);
   lines.push(`- **Test domains:** ${tools.map((t) => t.toUpperCase()).join(", ")}`);
   lines.push(`- **Scan mode:** ${scan.scanMode ?? "light"}`);
+  lines.push(`- **Authentication mode:** ${isAuthenticated ? "Authenticated" : "Unauthenticated"}`);
+  if (isAuthenticated) {
+    lines.push(`- **Coverage depth:** Full application surface (post-login)`);
+    if (authMeta?.authMethod) lines.push(`- **Auth method:** ${authMeta.authMethod.replace(/-/g, " ")}`);
+    if (authMeta?.authRole) lines.push(`- **Authenticated as:** ${authMeta.authRole}`);
+    if (authMeta?.loginUrl) lines.push(`- **Login endpoint:** ${authMeta.loginUrl}`);
+  } else {
+    lines.push(`- **Coverage depth:** External surface only`);
+  }
   lines.push(``);
   lines.push(`### Out of scope`);
   lines.push(`- Manual penetration testing, social engineering, and physical security`);
   lines.push(`- Code review (SAST) or dependency audit unless run separately`);
   lines.push(`- Testing of systems or endpoints not explicitly included as the target URL`);
+  if (!isAuthenticated) {
+    lines.push(`- Post-login application surfaces (no credentials were provided for this scan)`);
+  }
   lines.push(``);
   lines.push(`---`);
   lines.push(``);
@@ -139,6 +169,34 @@ export function generateMarkdownReport(data: ReportData): string {
 
   lines.push(`This report documents the results of an automated penetration test performed against **${target.name}** (${target.url}). The test was conducted using the Ghoststrike automated security assessment platform, aligned with industry-standard frameworks including OWASP Top 10:2021, PTES, NIST SP 800-115, CVSSv3.1, MITRE ATT&CK, and ISO 27001.`);
   lines.push(``);
+
+  // Coverage depth indicator
+  if (isAuthenticated) {
+    const postAuthCount = findings.filter((f) => (f as any).authContext === "post-auth").length;
+    const preAuthCount = findings.filter((f) => (f as any).authContext === "pre-auth").length;
+    lines.push(`### Coverage Depth`);
+    lines.push(``);
+    lines.push(`| Metric | Value |`);
+    lines.push(`|--------|-------|`);
+    lines.push(`| Coverage | **Full application surface (post-login)** |`);
+    if (authMeta?.authMethod) lines.push(`| Auth Method | ${authMeta.authMethod.replace(/-/g, " ")} |`);
+    if (authMeta?.authRole) lines.push(`| Authenticated As | ${authMeta.authRole} |`);
+    lines.push(`| Pre-authentication findings | ${preAuthCount} |`);
+    lines.push(`| Post-authentication findings | ${postAuthCount} |`);
+    lines.push(``);
+    if (postAuthCount === 0 && findings.length > 0) {
+      lines.push(`> ⚠️ **Warning:** Authenticated scan produced no additional findings beyond unauthenticated baseline — verify credentials were valid and session was maintained throughout the scan.`);
+      lines.push(``);
+    }
+  } else {
+    lines.push(`### Coverage Depth`);
+    lines.push(``);
+    lines.push(`| Metric | Value |`);
+    lines.push(`|--------|-------|`);
+    lines.push(`| Coverage | **External surface only** |`);
+    lines.push(`| Note | Post-login application surfaces were not tested |`);
+    lines.push(``);
+  }
 
   // Top 3 risks in plain English
   const critHigh = [...bySeverity.critical, ...bySeverity.high];
@@ -234,11 +292,41 @@ export function generateMarkdownReport(data: ReportData): string {
     "auth-roles": "Authenticated Multi-Role Scanning — Vertical/horizontal privilege escalation, IDOR, session handling",
     sca: "Dependency / SCA Scanning — Vulnerable dependency detection via OSV-Scanner or Trivy",
     ssrf: "SSRF Probe — Server-Side Request Forgery testing via URL/redirect/callback parameter injection",
+    "ai-prompt": "AI Prompt Injection — Jailbreak prompt detection, guardrail bypass, toxicity filter obfuscation (PEN-27)",
+    "secret-leak": "Secret Exposure — Client secret and credential leakage in API GET responses (PEN-33)",
+    "url-norm": "URL Normalisation Bypass — Percent-encoding, dot-segments, double-slashes, hostname tricks to bypass ACLs (PEN-42)",
+    "http-client": "Insecure HTTP Client — TLS trustAll, verifyHost(false), HTTP/2 cleartext upgrade detection (PEN-52)",
+    jwt: "JWT Security — Algorithm confusion (alg:none), expired token acceptance, weak HMAC signing detection",
+    "cookie-flags": "Cookie Security — Secure, HttpOnly, SameSite flag validation on session cookies",
+    smuggling: "HTTP Request Smuggling — CL.TE and TE.CL desync detection via timing and differential response analysis",
+    crlf: "CRLF Injection — Header injection via CR/LF characters in URL parameters (response splitting, cache poisoning)",
+    redirect: "Open Redirect — Redirect-to-external-domain detection on login, OAuth, and callback endpoints",
+    "proto-pollution": "Prototype Pollution — __proto__ and constructor.prototype injection in JSON API endpoints",
   };
   for (const tool of tools) {
     lines.push(`- **${tool.toUpperCase()}**: ${toolDescriptions[tool] || tool}`);
   }
   lines.push(``);
+
+  // Auth capability matrix
+  if (isAuthenticated) {
+    const capabilities = getToolAuthCapabilities(tools);
+    lines.push(`### Tool Authentication Capability`);
+    lines.push(``);
+    lines.push(`| Tool | Auth Support | Note |`);
+    lines.push(`|------|-------------|------|`);
+    const supportBadge = (s: string) => s === "full" ? "✅ Full" : s === "limited" ? "⚠️ Limited" : "❌ None";
+    for (const cap of capabilities) {
+      lines.push(`| ${cap.tool.toUpperCase()} | ${supportBadge(cap.authSupport)} | ${cap.note} |`);
+    }
+    lines.push(``);
+    const gaps = capabilities.filter((c) => c.authSupport !== "full");
+    if (gaps.length > 0) {
+      lines.push(`> **Coverage gaps:** ${gaps.map((g) => g.tool.toUpperCase()).join(", ")} ${gaps.length === 1 ? "does" : "do"} not fully support authenticated scanning. Findings from ${gaps.length === 1 ? "this tool" : "these tools"} may not differ between authenticated and unauthenticated scans.`);
+      lines.push(``);
+    }
+  }
+
   lines.push(`---`);
   lines.push(``);
 
@@ -249,15 +337,25 @@ export function generateMarkdownReport(data: ReportData): string {
   if (findings.length === 0) {
     lines.push(`✅ **No vulnerabilities detected.** The target passed all security checks for the selected test categories.`);
   } else {
-    lines.push(`| # | Title | Severity | CVSS | Priority | Category | Status |`);
-    lines.push(`|---|-------|----------|------|----------|----------|--------|`);
+    if (isAuthenticated) {
+      lines.push(`| # | Title | Severity | CVSS | Priority | Category | Auth Context | Status |`);
+      lines.push(`|---|-------|----------|------|----------|----------|-------------|--------|`);
+    } else {
+      lines.push(`| # | Title | Severity | CVSS | Priority | Category | Status |`);
+      lines.push(`|---|-------|----------|------|----------|----------|--------|`);
+    }
     let idx = 1;
     for (const [sev] of [["critical"], ["high"], ["medium"], ["low"], ["info"]] as const) {
       for (const f of bySeverity[sev]) {
         const title = f.title.length > 55 ? f.title.substring(0, 52) + "..." : f.title;
         const cvss = f.cvssScore ? String(Number(f.cvssScore).toFixed(1)) : "—";
         const priority = (f as any).remediationPriority ?? "—";
-        lines.push(`| ${idx++} | ${title} | ${severityBadge(f.severity)} | ${cvss} | ${priority} | ${f.category} | ${(f.status ?? "open").toUpperCase()} |`);
+        const authCtx = (f as any).authContext === "post-auth" ? "🔐 Post-auth" : (f as any).authContext === "pre-auth" ? "🌐 Pre-auth" : "—";
+        if (isAuthenticated) {
+          lines.push(`| ${idx++} | ${title} | ${severityBadge(f.severity)} | ${cvss} | ${priority} | ${f.category} | ${authCtx} | ${(f.status ?? "open").toUpperCase()} |`);
+        } else {
+          lines.push(`| ${idx++} | ${title} | ${severityBadge(f.severity)} | ${cvss} | ${priority} | ${f.category} | ${(f.status ?? "open").toUpperCase()} |`);
+        }
       }
     }
     lines.push(``);
@@ -477,6 +575,23 @@ export function generateMarkdownReport(data: ReportData): string {
     lines.push(``);
     lines.push(`Compared against previous scan #${trend.previousScanId} (${trend.previousScanDate}):`);
     lines.push(``);
+
+    // Warn if scans used different auth modes
+    const prevAuthMode = (trend as any).previousAuthMode;
+    if (prevAuthMode && prevAuthMode !== authModeValue) {
+      lines.push(`> ⚠️ **Different authentication modes:** This scan was **${authModeValue}** but the previous scan (#${trend.previousScanId}) was **${prevAuthMode}**. Differences in findings may reflect the changed authentication context rather than genuine vulnerability changes. This is not a like-for-like comparison.`);
+      lines.push(``);
+      if (isAuthenticated && prevAuthMode === "unauthenticated") {
+        const newCount = trend.newFindings;
+        const resolvedCount = trend.resolvedFindings;
+        lines.push(`**Authenticated vs Unauthenticated comparison:**`);
+        lines.push(`- **${newCount} findings unique to authenticated scan** — new attack surface visible only with valid credentials`);
+        lines.push(`- **${trend.persistingFindings} findings common to both** — issues visible regardless of authentication state`);
+        lines.push(`- **${resolvedCount} findings only in unauthenticated scan** — may be false positives or session-dependent behaviour`);
+        lines.push(``);
+      }
+    }
+
     lines.push(`| Metric | Count |`);
     lines.push(`|--------|-------|`);
     lines.push(`| New findings | **${trend.newFindings}** |`);
@@ -604,7 +719,12 @@ export function generateMarkdownReport(data: ReportData): string {
   lines.push(`### Limitations`);
   lines.push(`- Automated testing cannot replace comprehensive manual penetration testing`);
   lines.push(`- Some vulnerabilities (e.g. business logic flaws) require human expertise to identify`);
-  lines.push(`- Tests were performed as an unauthenticated external user unless credentials were provided`);
+  if (isAuthenticated) {
+    lines.push(`- Tests were performed with provided credentials; coverage is limited to the permissions of the authenticated role`);
+    lines.push(`- External tools (Nikto, Nuclei) have limited authenticated crawling — they may not discover post-login specific issues`);
+  } else {
+    lines.push(`- Tests were performed as an unauthenticated external user — post-login surfaces were not assessed`);
+  }
   lines.push(`- Rate limiting and WAF rules may have prevented some test payloads from reaching the application`);
   lines.push(``);
   lines.push(`---`);
@@ -647,9 +767,25 @@ export function generateExecutiveSummary(data: ReportData): string {
   const medium = findings.filter((f) => f.severity === "medium").length;
   const low = findings.filter((f) => f.severity === "low").length;
 
+  const authMeta = (scan as any).authMeta as ScanAuthMeta | null;
+  const isAuth = authMeta?.authMode === "authenticated" || (scan as any).authMode === "authenticated";
+
   const parts: string[] = [];
-  parts.push(`Security assessment of ${target.name} (${target.url}) completed with a grade of ${grade} (${gradeLabel}) — ${score}/100.`);
+  const modeLabel = isAuth ? "authenticated" : "unauthenticated";
+  parts.push(`${modeLabel.charAt(0).toUpperCase() + modeLabel.slice(1)} security assessment of ${target.name} (${target.url}) completed with a grade of ${grade} (${gradeLabel}) — ${score}/100.`);
+  if (isAuth) {
+    parts.push(`Coverage: full application surface (post-login)${authMeta?.authRole ? ` as ${authMeta.authRole}` : ""}.`);
+  } else {
+    parts.push(`Coverage: external surface only.`);
+  }
   parts.push(`${findings.length} finding(s) identified: ${critical} critical, ${high} high, ${medium} medium, ${low} low.`);
+
+  if (isAuth) {
+    const postAuthCount = findings.filter((f) => (f as any).authContext === "post-auth").length;
+    if (postAuthCount === 0 && findings.length > 0) {
+      parts.push("WARNING: Authenticated scan produced no additional findings beyond unauthenticated baseline — verify credentials were valid and session was maintained.");
+    }
+  }
 
   const critHigh = findings.filter((f) => f.severity === "critical" || f.severity === "high");
   if (critHigh.length > 0) {
@@ -668,6 +804,9 @@ export function generateExecutiveSummary(data: ReportData): string {
 export function generateJSONReport(data: ReportData): object {
   const { scan, target, findings, generatedAt } = data;
   const tools = (scan.tools || "").split(",").map((t) => t.trim());
+  const authMetaJson = (scan as any).authMeta as ScanAuthMeta | null;
+  const isAuthJson = authMetaJson?.authMode === "authenticated" || (scan as any).authMode === "authenticated";
+  const capabilities = getToolAuthCapabilities(tools);
   return {
     metadata: {
       reportVersion: REPORT_VERSION,
@@ -680,6 +819,9 @@ export function generateJSONReport(data: ReportData): object {
       assessmentType: "Automated penetration test (DAST)",
       testDomains: tools,
       scanMode: scan.scanMode ?? "light",
+      authMode: isAuthJson ? "authenticated" : "unauthenticated",
+      coverageDepth: isAuthJson ? "Full application surface (post-login)" : "External surface only",
+      authMeta: authMetaJson ?? null,
     },
     target: {
       name: target.name,
@@ -732,12 +874,13 @@ export function generateJSONReport(data: ReportData): object {
       apiSecurityCategory: deriveApiSecurityCategory(f.category, f.cweId),
       authContext: (() => {
         const m = f.evidence?.match(/^\[Auth Context\] (.+?)$/m);
-        if (!m) return null;
+        if (!m) return (f as any).authContext ? { mode: (f as any).authContext } : null;
         const obj: Record<string, string> = {};
         for (const part of m[1].split(" | ")) {
           const [k, ...v] = part.split(": ");
           if (k && v.length) obj[k.replace(/\s+/g, "").charAt(0).toLowerCase() + k.replace(/\s+/g, "").slice(1)] = v.join(": ");
         }
+        if ((f as any).authContext) obj.mode = (f as any).authContext;
         return Object.keys(obj).length > 0 ? obj : null;
       })(),
       poc: f.poc ?? null,
@@ -749,6 +892,7 @@ export function generateJSONReport(data: ReportData): object {
     compliance: {
       frameworks: ["OWASP Top 10:2021", "OWASP API Security Top 10:2023", "PTES", "NIST SP 800-115", "CWE Top 25", "CVSSv3.1", "MITRE ATT&CK", "ISO/IEC 27001"],
       toolsUsed: tools,
+      toolAuthCapabilities: capabilities.map((c) => ({ tool: c.tool, authSupport: c.authSupport, note: c.note })),
     },
   };
 }

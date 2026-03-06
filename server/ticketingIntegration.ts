@@ -162,7 +162,7 @@ export function buildJiraLabels(finding: ScanFinding, extraLabels: string[] = []
   const labels = ["ghoststrike", "security", ...extraLabels];
   if (finding.owaspCategory) labels.push(finding.owaspCategory.split(" ")[0]);
   if (finding.cweId) labels.push(finding.cweId);
-  return [...new Set(labels)];
+  return Array.from(new Set(labels));
 }
 
 /** Generate a stable hash for a finding based on title + category for deduplication */

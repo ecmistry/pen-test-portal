@@ -14,6 +14,8 @@ const mockScan: Scan = {
   status: "completed",
   tools: "headers,auth,sqli,xss",
   scanMode: "light",
+  authMode: null,
+  authMeta: null,
   securityScore: 85,
   riskLevel: "low",
   totalFindings: 2,
@@ -65,6 +67,7 @@ const mockFindings: ScanFinding[] = [
     attackTechniques: [{ techniqueId: "T1190", techniqueName: "Exploit Public-Facing Application", tactic: "Initial Access" }],
     iso27001Controls: ["A.14.1.2"],
     poc: null,
+    authContext: null,
     status: "open",
     createdAt: new Date(),
   },
@@ -87,6 +90,7 @@ const mockFindings: ScanFinding[] = [
     attackTechniques: [{ techniqueId: "T1110", techniqueName: "Brute Force", tactic: "Credential Access" }],
     iso27001Controls: ["A.9.4.2", "A.9.4.3"],
     poc: null,
+    authContext: null,
     status: "open",
     createdAt: new Date(),
   },
@@ -838,6 +842,304 @@ describe("reportGenerator", () => {
     it("includes A06 in OWASP coverage line", () => {
       const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() });
       expect(md).toContain("A06");
+    });
+
+    it("includes ssrf in tool descriptions", () => {
+      const scanWithSsrf = { ...mockScan, tools: "headers,ssrf" };
+      const md = generateMarkdownReport({ scan: scanWithSsrf, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(md).toContain("SSRF");
+    });
+
+    it("includes A10 in OWASP coverage line", () => {
+      const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(md).toContain("A10");
+    });
+
+    it("renders OWASP API Security coverage section", () => {
+      const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: mockFindings, generatedAt: new Date() });
+      expect(md).toContain("OWASP API Security Top 10:2023");
+    });
+
+    it("includes all frameworks in compliance table", () => {
+      const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(md).toContain("OWASP Top 10:2021");
+      expect(md).toContain("PTES");
+      expect(md).toContain("NIST SP 800-115");
+      expect(md).toContain("CWE Top 25");
+      expect(md).toContain("CVSSv3.1");
+      expect(md).toContain("MITRE ATT&CK");
+      expect(md).toContain("ISO/IEC 27001");
+    });
+  });
+
+  describe("generateJSONReport — edge cases", () => {
+    it("includes all 8 frameworks in JSON compliance", () => {
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() }) as any;
+      expect(json.compliance.frameworks).toHaveLength(8);
+      expect(json.compliance.frameworks).toContain("OWASP API Security Top 10:2023");
+    });
+
+    it("includes toolsUsed from scan", () => {
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() }) as any;
+      expect(json.compliance.toolsUsed).toContain("headers");
+      expect(json.compliance.toolsUsed).toContain("auth");
+    });
+
+    it("includes apiSecurityCategory in finding", () => {
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: mockFindings, generatedAt: new Date() }) as any;
+      const f = json.findings[0];
+      expect(f).toHaveProperty("apiSecurityCategory");
+    });
+
+    it("calculates security grade correctly in JSON", () => {
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() }) as any;
+      expect(json.summary.securityGrade).toHaveProperty("grade");
+      expect(json.summary.securityGrade).toHaveProperty("label");
+    });
+
+    it("includes remediation data with priority and complexity", () => {
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: mockFindings, generatedAt: new Date() }) as any;
+      const f = json.findings[0];
+      expect(f.remediation).toHaveProperty("priority");
+      expect(f.remediation).toHaveProperty("complexity");
+    });
+
+    it("parses authContext from evidence with [Auth Context] format", () => {
+      const authFinding: ScanFinding = {
+        ...mockFindings[0],
+        evidence: "[Auth Context] Discovered As: viewer | Exploitable As: viewer | Required Level: admin | Endpoint: GET /api/admin",
+      };
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: [authFinding], generatedAt: new Date() }) as any;
+      const ctx = json.findings[0].authContext;
+      expect(ctx).not.toBeNull();
+      expect(ctx.discoveredAs).toBe("viewer");
+      expect(ctx.exploitableAs).toBe("viewer");
+      expect(ctx.requiredLevel).toBe("admin");
+      expect(ctx.endpoint).toBe("GET /api/admin");
+    });
+
+    it("returns null authContext when evidence lacks [Auth Context]", () => {
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: mockFindings, generatedAt: new Date() }) as any;
+      expect(json.findings[0].authContext).toBeNull();
+    });
+  });
+
+  describe("securityGrade — boundary values", () => {
+    it("score 0 returns F", () => {
+      expect(securityGrade(0).grade).toBe("F");
+    });
+
+    it("score 54 returns F", () => {
+      expect(securityGrade(54).grade).toBe("F");
+    });
+
+    it("score 55 returns D", () => {
+      expect(securityGrade(55).grade).toBe("D");
+    });
+
+    it("score 69 returns D", () => {
+      expect(securityGrade(69).grade).toBe("D");
+    });
+
+    it("score 70 returns C", () => {
+      expect(securityGrade(70).grade).toBe("C");
+    });
+
+    it("score 79 returns C", () => {
+      expect(securityGrade(79).grade).toBe("C");
+    });
+
+    it("score 80 returns B", () => {
+      expect(securityGrade(80).grade).toBe("B");
+    });
+
+    it("score 89 returns B", () => {
+      expect(securityGrade(89).grade).toBe("B");
+    });
+
+    it("score 90 returns A", () => {
+      expect(securityGrade(90).grade).toBe("A");
+    });
+
+    it("score 100 returns A", () => {
+      expect(securityGrade(100).grade).toBe("A");
+    });
+  });
+
+  describe("generateExecutiveSummary — edge cases", () => {
+    it("includes security score and grade", () => {
+      const summary = generateExecutiveSummary({ scan: mockScan, target: mockTarget, findings: mockFindings, generatedAt: new Date() });
+      expect(summary).toContain("85");
+    });
+
+    it("states strong security posture when no findings and high score", () => {
+      const summary = generateExecutiveSummary({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(summary).toContain("strong security posture");
+    });
+
+    it("recommends improvements for low score with no findings", () => {
+      const lowScoreScan = { ...mockScan, securityScore: 50 };
+      const summary = generateExecutiveSummary({ scan: lowScoreScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(summary).toContain("improvements are recommended");
+    });
+
+    it("includes top risks for high/critical findings", () => {
+      const summary = generateExecutiveSummary({ scan: mockScan, target: mockTarget, findings: mockFindings, generatedAt: new Date() });
+      expect(summary).toContain("Top risks");
+      expect(summary).toContain("No brute force protection");
+    });
+  });
+
+  // ─── Auth Mode Differentiation ───────────────────────────────────────────
+
+  describe("auth mode — unauthenticated scan", () => {
+    it("shows unauthenticated banner in markdown", () => {
+      const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(md).toContain("UNAUTHENTICATED SCAN");
+      expect(md).toContain("External surface only");
+    });
+
+    it("shows unauthenticated in header table", () => {
+      const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(md).toContain("| Authentication Mode | **Unauthenticated** |");
+    });
+
+    it("shows external-only coverage in scope", () => {
+      const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(md).toContain("Coverage depth:** External surface only");
+    });
+
+    it("mentions post-login not tested in out of scope", () => {
+      const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(md).toContain("Post-login application surfaces");
+    });
+
+    it("does not include auth capability matrix", () => {
+      const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(md).not.toContain("Tool Authentication Capability");
+    });
+
+    it("does not include auth context column in findings table", () => {
+      const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: mockFindings, generatedAt: new Date() });
+      expect(md).not.toContain("Auth Context |");
+    });
+  });
+
+  describe("auth mode — authenticated scan", () => {
+    const authScan: Scan = {
+      ...mockScan,
+      authMode: "authenticated",
+      authMeta: { authMode: "authenticated", authMethod: "session-cookie", authRole: "admin", loginUrl: "https://example.com/login" },
+    };
+
+    const authFindings: ScanFinding[] = [
+      { ...mockFindings[0], authContext: "pre-auth" },
+      { ...mockFindings[1], authContext: "post-auth" },
+    ];
+
+    it("shows authenticated banner in markdown", () => {
+      const md = generateMarkdownReport({ scan: authScan, target: mockTarget, findings: authFindings, generatedAt: new Date() });
+      expect(md).toContain("AUTHENTICATED SCAN");
+    });
+
+    it("shows authenticated in header table", () => {
+      const md = generateMarkdownReport({ scan: authScan, target: mockTarget, findings: authFindings, generatedAt: new Date() });
+      expect(md).toContain("| Authentication Mode | **Authenticated** |");
+    });
+
+    it("shows auth method and role in header", () => {
+      const md = generateMarkdownReport({ scan: authScan, target: mockTarget, findings: authFindings, generatedAt: new Date() });
+      expect(md).toContain("session cookie");
+      expect(md).toContain("admin");
+    });
+
+    it("shows full coverage depth", () => {
+      const md = generateMarkdownReport({ scan: authScan, target: mockTarget, findings: authFindings, generatedAt: new Date() });
+      expect(md).toContain("Full application surface (post-login)");
+    });
+
+    it("shows pre/post auth finding counts", () => {
+      const md = generateMarkdownReport({ scan: authScan, target: mockTarget, findings: authFindings, generatedAt: new Date() });
+      expect(md).toContain("Pre-authentication findings");
+      expect(md).toContain("Post-authentication findings");
+    });
+
+    it("includes auth context column in findings table", () => {
+      const md = generateMarkdownReport({ scan: authScan, target: mockTarget, findings: authFindings, generatedAt: new Date() });
+      expect(md).toContain("Auth Context");
+      expect(md).toContain("Pre-auth");
+      expect(md).toContain("Post-auth");
+    });
+
+    it("includes tool auth capability matrix", () => {
+      const md = generateMarkdownReport({ scan: authScan, target: mockTarget, findings: authFindings, generatedAt: new Date() });
+      expect(md).toContain("Tool Authentication Capability");
+      expect(md).toContain("Auth Support");
+    });
+
+    it("warns when no post-auth findings", () => {
+      const preOnlyFindings: ScanFinding[] = [{ ...mockFindings[0], authContext: "pre-auth" }];
+      const md = generateMarkdownReport({ scan: authScan, target: mockTarget, findings: preOnlyFindings, generatedAt: new Date() });
+      expect(md).toContain("verify credentials were valid");
+    });
+
+    it("does not warn when post-auth findings exist", () => {
+      const md = generateMarkdownReport({ scan: authScan, target: mockTarget, findings: authFindings, generatedAt: new Date() });
+      expect(md).not.toContain("verify credentials were valid");
+    });
+  });
+
+  describe("auth mode — executive summary", () => {
+    it("labels authenticated scan", () => {
+      const authScan: Scan = { ...mockScan, authMode: "authenticated", authMeta: { authMode: "authenticated", authRole: "admin" } };
+      const summary = generateExecutiveSummary({ scan: authScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(summary).toContain("Authenticated");
+      expect(summary).toContain("full application surface");
+    });
+
+    it("labels unauthenticated scan", () => {
+      const summary = generateExecutiveSummary({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() });
+      expect(summary).toContain("Unauthenticated");
+      expect(summary).toContain("external surface only");
+    });
+
+    it("warns when no post-auth findings in authenticated scan", () => {
+      const authScan: Scan = { ...mockScan, authMode: "authenticated", authMeta: { authMode: "authenticated" } };
+      const preOnlyFindings: ScanFinding[] = [{ ...mockFindings[0], authContext: "pre-auth" }];
+      const summary = generateExecutiveSummary({ scan: authScan, target: mockTarget, findings: preOnlyFindings, generatedAt: new Date() });
+      expect(summary).toContain("WARNING");
+      expect(summary).toContain("no additional findings");
+    });
+  });
+
+  describe("auth mode — JSON report", () => {
+    it("includes authMode in scope", () => {
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() }) as any;
+      expect(json.scope.authMode).toBe("unauthenticated");
+      expect(json.scope.coverageDepth).toBe("External surface only");
+    });
+
+    it("includes auth metadata for authenticated scan", () => {
+      const authScan: Scan = { ...mockScan, authMode: "authenticated", authMeta: { authMode: "authenticated", authMethod: "bearer-token", authRole: "admin" } };
+      const json = generateJSONReport({ scan: authScan, target: mockTarget, findings: [], generatedAt: new Date() }) as any;
+      expect(json.scope.authMode).toBe("authenticated");
+      expect(json.scope.coverageDepth).toBe("Full application surface (post-login)");
+      expect(json.scope.authMeta.authMethod).toBe("bearer-token");
+    });
+
+    it("includes toolAuthCapabilities in compliance", () => {
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: [], generatedAt: new Date() }) as any;
+      expect(json.compliance.toolAuthCapabilities).toBeDefined();
+      expect(json.compliance.toolAuthCapabilities.length).toBeGreaterThan(0);
+      expect(json.compliance.toolAuthCapabilities[0]).toHaveProperty("tool");
+      expect(json.compliance.toolAuthCapabilities[0]).toHaveProperty("authSupport");
+    });
+
+    it("includes authContext mode tag in finding", () => {
+      const authFindings: ScanFinding[] = [{ ...mockFindings[0], authContext: "post-auth" }];
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: authFindings, generatedAt: new Date() }) as any;
+      expect(json.findings[0].authContext).toBeDefined();
+      expect(json.findings[0].authContext.mode).toBe("post-auth");
     });
   });
 });

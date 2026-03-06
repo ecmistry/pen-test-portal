@@ -10,6 +10,8 @@ const mockScan: Scan = {
   status: "completed",
   tools: "headers,auth,sqli,xss",
   scanMode: "light",
+  authMode: null,
+  authMeta: null,
   securityScore: 85,
   riskLevel: "low",
   totalFindings: 1,
@@ -61,6 +63,7 @@ const mockFindings: ScanFinding[] = [
     attackTechniques: [{ techniqueId: "T1190", techniqueName: "Exploit Public-Facing Application", tactic: "Initial Access" }],
     iso27001Controls: ["A.14.1.2"],
     poc: null,
+    authContext: null,
     status: "open",
     createdAt: new Date(),
   },
@@ -234,5 +237,43 @@ describe("pdfReport", () => {
     const buf = generatePdfReport(reportData);
     const str = buf.toString("latin1");
     expect(str).toContain("85/100");
+  });
+
+  it("shows UNAUTHENTICATED SCAN banner for unauthenticated scan", () => {
+    const buf = generatePdfReport(reportData);
+    const str = buf.toString("latin1");
+    expect(str).toContain("UNAUTHENTICATED SCAN");
+  });
+
+  it("shows AUTHENTICATED SCAN banner for authenticated scan", () => {
+    const authScan: Scan = { ...mockScan, authMode: "authenticated", authMeta: { authMode: "authenticated", authMethod: "session-cookie", authRole: "admin" } };
+    const data: ReportData = { ...reportData, scan: authScan };
+    const buf = generatePdfReport(data);
+    const str = buf.toString("latin1");
+    expect(str).toContain("AUTHENTICATED SCAN");
+  });
+
+  it("shows auth mode in scan metadata line", () => {
+    const buf = generatePdfReport(reportData);
+    const str = buf.toString("latin1");
+    expect(str).toContain("Unauthenticated");
+  });
+
+  it("shows Authenticated in scope for auth scan", () => {
+    const authScan: Scan = { ...mockScan, authMode: "authenticated", authMeta: { authMode: "authenticated" } };
+    const data: ReportData = { ...reportData, scan: authScan };
+    const buf = generatePdfReport(data);
+    const str = buf.toString("latin1");
+    expect(str).toContain("Authenticated");
+    expect(str).toContain("Full application surface");
+  });
+
+  it("includes pre/post auth counts for authenticated scan", () => {
+    const authScan: Scan = { ...mockScan, authMode: "authenticated", authMeta: { authMode: "authenticated" } };
+    const authFindings: ScanFinding[] = [{ ...mockFindings[0], authContext: "pre-auth" }];
+    const data: ReportData = { ...reportData, scan: authScan, findings: authFindings };
+    const buf = generatePdfReport(data);
+    const str = buf.toString("latin1");
+    expect(str).toContain("Pre-auth");
   });
 });
