@@ -3665,30 +3665,74 @@ export async function runScan(
           await log(scanId, "info", "OWASP ZAP scan: checking if zap is available...", "zap");
           try {
             const { execSync } = await import("child_process");
-            execSync("which zap.sh || which zap-cli", { stdio: "ignore" });
-            await log(scanId, "info", "ZAP found — running baseline scan (up to 5 minutes; no further logs until it finishes)...", "zap");
-            const { stdout } = await execAsync(`zap-baseline.py -t ${targetUrl} -J /tmp/zap-report.json 2>&1 || zap.sh -cmd -quickurl ${targetUrl} 2>&1`, {
+            const fs = await import("fs");
+            execSync("which zap.sh", { stdio: "ignore" });
+
+            const zapHome = process.env.HOME || "/home/ec2-user";
+            const zapLock = `${zapHome}/.ZAP/.homelock`;
+            try { fs.unlinkSync(zapLock); } catch { /* no stale lock */ }
+
+            const zapOutFile = `/tmp/zap-report-${scanId}.json`;
+            await log(scanId, "info", "ZAP found — running quick scan (up to 5 minutes)...", "zap");
+            const { stdout } = await execAsync(`zap.sh -cmd -quickurl ${targetUrl} -quickout ${zapOutFile} -quickprogress 2>&1`, {
               timeout: 300000,
               encoding: "utf8",
               maxBuffer: 4 * 1024 * 1024,
             });
-            const output = stdout ?? "";
-            await log(scanId, "info", output.substring(0, 2000), "zap");
-            toolFindings.push({
-              category: "OWASP ZAP",
-              severity: "info",
-              title: "ZAP baseline scan completed",
-              description: "OWASP ZAP baseline scan completed. Review the full output for detailed findings.",
-              evidence: output.substring(0, 500),
-              recommendation: "Review ZAP report for detailed vulnerability information.",
-            });
+            const consoleOutput = stdout ?? "";
+            await log(scanId, "info", consoleOutput.substring(0, 2000), "zap");
+
+            let zapAlertCount = 0;
+            try {
+              const zapJson = JSON.parse(fs.readFileSync(zapOutFile, "utf8"));
+              const riskMap: Record<string, Finding["severity"]> = { "0": "info", "1": "low", "2": "medium", "3": "high" };
+              const sites: Array<{ alerts?: Array<Record<string, unknown>> }> = zapJson.site || [];
+              for (const site of sites) {
+                for (const alert of site.alerts || []) {
+                  const severity = riskMap[String(alert.riskcode)] || "info";
+                  const desc = String(alert.desc || "").replace(/<[^>]*>/g, "").trim();
+                  const solution = String(alert.solution || "").replace(/<[^>]*>/g, "").trim();
+                  const instances = Array.isArray(alert.instances) ? alert.instances : [];
+                  const firstUri = instances.length > 0 ? String((instances[0] as Record<string,unknown>).uri || "") : "";
+                  const cweId = alert.cweid ? `CWE-${alert.cweid}` : undefined;
+                  toolFindings.push({
+                    category: "OWASP ZAP",
+                    severity,
+                    title: `[ZAP] ${String(alert.name || alert.alert || "Unknown alert")}`,
+                    description: desc.substring(0, 1500),
+                    evidence: `Affected: ${instances.length} instance(s)${firstUri ? ` — e.g. ${firstUri}` : ""}`,
+                    recommendation: solution.substring(0, 1000),
+                    cweId,
+                  });
+                  zapAlertCount++;
+                }
+              }
+            } catch {
+              await log(scanId, "warn", "ZAP JSON report could not be parsed — using console output only", "zap");
+            }
+
+            if (zapAlertCount === 0) {
+              toolFindings.push({
+                category: "OWASP ZAP",
+                severity: "info",
+                title: "ZAP quick scan completed — no alerts",
+                description: "OWASP ZAP quick scan completed with no alerts. This indicates good baseline security posture or that the target surface was limited.",
+                evidence: consoleOutput.substring(0, 500),
+                recommendation: "Consider running a full ZAP active scan with authentication for deeper coverage.",
+              });
+            } else {
+              await log(scanId, "info", `ZAP produced ${zapAlertCount} alert(s) parsed into individual findings`, "zap");
+            }
+
+            try { fs.unlinkSync(zapOutFile); } catch { /* cleanup best-effort */ }
+            try { fs.unlinkSync(zapLock); } catch { /* cleanup best-effort */ }
           } catch {
             await log(scanId, "warn", "OWASP ZAP not installed or scan failed. Install from: https://www.zaproxy.org/", "zap");
             toolFindings.push({
               category: "Tool Availability",
               severity: "info",
               title: "OWASP ZAP not available",
-              description: "OWASP ZAP is not installed. This significantly limits authenticated scan coverage, as Nikto does not perform authenticated crawling of post-login application surfaces. Install ZAP to enable meaningful authenticated DAST testing.",
+              description: "OWASP ZAP is not installed or the scan failed. This limits DAST coverage. Install ZAP to enable session-aware crawling and authenticated scanning.",
               recommendation: "Install OWASP ZAP from https://www.zaproxy.org/download/ — ZAP provides session-aware crawling and authenticated scanning that other tools (Nikto, Nuclei) cannot replicate.",
             });
           }
