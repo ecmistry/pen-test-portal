@@ -116,3 +116,10 @@ temp/
 data/
 .manus-logs/
 .manus/
+
+# Scan output artifacts (Nikto, ZAP reports dumped to project root)
+nikto_*.txt
+zap-report-*.json
+
+# PEN ticket PDFs (sensitive reference documents)
+*.pdf
