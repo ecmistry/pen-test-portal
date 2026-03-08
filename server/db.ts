@@ -40,6 +40,9 @@ async function applyLightMigrations(db: ReturnType<typeof drizzle>) {
   await safeAlter("ALTER TABLE scans ADD COLUMN authMode VARCHAR(20) DEFAULT NULL");
   await safeAlter("ALTER TABLE scans ADD COLUMN authMeta JSON DEFAULT NULL");
   await safeAlter("ALTER TABLE scan_findings ADD COLUMN authContext VARCHAR(20) DEFAULT NULL");
+  await safeAlter("ALTER TABLE reports MODIFY markdownContent MEDIUMTEXT");
+  await safeAlter("ALTER TABLE reports MODIFY executiveSummary MEDIUMTEXT");
+  await safeAlter("ALTER TABLE reports MODIFY complianceNotes MEDIUMTEXT");
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────────

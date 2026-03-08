@@ -3,6 +3,7 @@ import {
   decimal,
   int,
   json,
+  mediumtext,
   mysqlEnum,
   mysqlTable,
   text,
@@ -138,10 +139,10 @@ export const reports = mysqlTable("reports", {
   scanId: int("scanId").notNull(),
   userId: int("userId").notNull(),
   title: varchar("title", { length: 500 }).notNull(),
-  executiveSummary: text("executiveSummary"),
-  markdownContent: text("markdownContent"),
+  executiveSummary: mediumtext("executiveSummary"),
+  markdownContent: mediumtext("markdownContent"),
   jsonContent: json("jsonContent"),
-  complianceNotes: text("complianceNotes"),
+  complianceNotes: mediumtext("complianceNotes"),
   generatedAt: timestamp("generatedAt").defaultNow().notNull(),
 });
 
