@@ -167,6 +167,14 @@ export function isNiktoMetadataLine(line: string): boolean {
     /^-{5,}/.test(trimmed);
 }
 
+/** Detect legacy CGI/server probes that are irrelevant for modern apps */
+export function isNiktoLegacyCGI(line: string): boolean {
+  const lower = line.toLowerCase();
+  return /\.cgi[\s/:]|\.exe[\s/:]|\.pl[\s/:]|\.cfm[\s/:]|\.asp[\s/:]/.test(lower) ||
+    /cart32|classified|formmail|handler\.cgi|htsearch|infosrch|nph-|phf|test-cgi|view-source/.test(lower) ||
+    /iis|frontpage|_vti_|_private|msadc|scripts\/|cgi-bin\//.test(lower);
+}
+
 // ─── Auth Profile Types ──────────────────────────────────────────────────────
 
 export interface AuthProfile {
@@ -564,9 +572,14 @@ const LOGIN_CONFIGS: LoginConfig[] = [
   { path: "/api/trpc/auth.login", bodyFn: (e, p) => JSON.stringify({ json: { email: e, password: p } }) },
   { path: "/api/trpc/auth.login/mutate", bodyFn: (e, p) => JSON.stringify({ json: { email: e, password: p } }) },
   { path: "/api/auth/login", bodyFn: (e, p) => JSON.stringify({ email: e, password: p }) },
+  { path: "/api/v1/auth/login", bodyFn: (e, p) => JSON.stringify({ email: e, password: p }) },
   { path: "/api/login", bodyFn: (e, p) => JSON.stringify({ email: e, password: p }) },
-  { path: "/login", bodyFn: (e, p) => JSON.stringify({ email: e, password: p }) },
+  { path: "/api/v1/login", bodyFn: (e, p) => JSON.stringify({ email: e, password: p }) },
   { path: "/auth/login", bodyFn: (e, p) => JSON.stringify({ email: e, password: p }) },
+  { path: "/login", bodyFn: (e, p) => JSON.stringify({ email: e, password: p }) },
+  { path: "/api/session", bodyFn: (e, p) => JSON.stringify({ email: e, password: p }) },
+  { path: "/api/auth/signin", bodyFn: (e, p) => JSON.stringify({ email: e, password: p }) },
+  { path: "/graphql", bodyFn: (e, p) => JSON.stringify({ query: `mutation { login(email: "${e}", password: "${p}") { token } }` }) },
 ];
 
 function isRateLimited(resp: { status: number; headers: Record<string, string>; body: string }): boolean {
@@ -629,8 +642,8 @@ async function testAuthentication(scanId: number, targetUrl: string, scanMode: S
         category: "Authentication",
         severity: "medium",
         title: "Potential account enumeration vulnerability",
-        description: "Different responses for valid vs invalid email addresses may allow attackers to enumerate valid accounts.",
-        evidence: `Valid email response (${validResp.status}): ${validResp.body.substring(0, 100)}\nInvalid email response (${invalidResp.status}): ${invalidResp.body.substring(0, 100)}`,
+        description: `Different responses for valid vs invalid email addresses may allow attackers to enumerate valid accounts. Tested: POST ${testEndpoint}.`,
+        evidence: `Endpoint: POST ${testEndpoint}\nValid email response (${validResp.status}): ${validResp.body.substring(0, 100)}\nInvalid email response (${invalidResp.status}): ${invalidResp.body.substring(0, 100)}`,
         recommendation: "Return identical error messages and status codes for both valid and invalid credentials.",
         cweId: "CWE-203",
         owaspCategory: "A07:2021 – Identification and Authentication Failures",
@@ -661,17 +674,20 @@ async function testAuthentication(scanId: number, targetUrl: string, scanMode: S
       }
     }
     if (!lockedOut) {
+      const endpointNote = loginConfig
+        ? `Tested: POST ${testEndpoint} with Content-Type: application/json (endpoint discovered via probe)`
+        : `Tested: POST ${testEndpoint} with Content-Type: application/json (no standard login endpoint found — used fallback)`;
       findings.push({
         category: "Authentication",
         severity: "high",
         title: "No brute force protection detected",
-        description: "The application does not appear to lock accounts or rate-limit after multiple failed login attempts.",
-        evidence: `${bruteForceAttempts} consecutive failed login attempts did not trigger lockout or rate limiting (no 429, Retry-After, or X-RateLimit-Remaining: 0)`,
-        recommendation: "Implement account lockout after 3-5 failed attempts, rate limiting (e.g. 5 attempts per 15 minutes), and consider CAPTCHA.",
+        description: `The application does not appear to lock accounts or rate-limit after multiple failed login attempts. ${endpointNote}. If the scanner did not test the real login endpoint, this may be a false positive — configure the target's login URL for accurate results.`,
+        evidence: `${bruteForceAttempts} consecutive failed login attempts to POST ${testEndpoint} did not trigger lockout or rate limiting (no 429, Retry-After, or X-RateLimit-Remaining: 0).`,
+        recommendation: "Implement account lockout after 3-5 failed attempts, rate limiting (e.g. 5 attempts per 15 minutes), and consider CAPTCHA. If the scanner tested a non-login path, configure the correct login endpoint in the target settings.",
         cweId: "CWE-307",
         owaspCategory: "A07:2021 – Identification and Authentication Failures",
       });
-      await log(scanId, "warn", "No brute force protection detected", "auth");
+      await log(scanId, "warn", `No brute force protection detected (tested: POST ${testEndpoint})`, "auth");
     }
   } catch (err: any) {
     await log(scanId, "info", `Brute force test skipped: ${err.message}`, "auth");
@@ -941,17 +957,40 @@ export function isSpaFallback(body: string, contentType: string): boolean {
 /** Check if body contains file-specific content (real exposure vs SPA fallback). Exported for tests. */
 export function hasFileSpecificContent(path: string, body: string): boolean {
   const b = body.substring(0, 2000);
+  const lowerTrimmed = b.trim().toLowerCase();
+  const isHtml = lowerTrimmed.startsWith("<!doctype") || lowerTrimmed.startsWith("<html");
   if (path.includes(".env")) {
-    return /^[A-Z_][A-Z0-9_]*\s*=/m.test(b) && !b.trim().toLowerCase().startsWith("<!doctype");
+    return /^[A-Z_][A-Z0-9_]*\s*=/m.test(b) && !isHtml;
   }
-  if (path.includes(".git/config")) {
-    return /\[core\]|\[remote\]/.test(b) && !b.trim().toLowerCase().startsWith("<!doctype");
+  if (path.includes(".git/config") || path.includes(".git/HEAD")) {
+    return (/\[core\]|\[remote\]/.test(b) || /^ref:\s+refs\//m.test(b)) && !isHtml;
   }
-  if (path.includes("phpinfo")) {
+  if (path.includes("phpinfo") || path.includes("config.php")) {
     return /PHP Version|Configuration|phpinfo\(\)/i.test(b);
   }
-  if (path.includes("wp-admin")) {
+  if (path.includes("wp-admin") || path.includes("wp-login")) {
     return /wordpress|wp-login|wp-admin/i.test(b);
+  }
+  if (path.endsWith(".sql")) {
+    return /^(CREATE|INSERT|DROP|ALTER|--\s)/mi.test(b) && !isHtml;
+  }
+  if (path.endsWith(".json") || path.endsWith(".yml") || path.endsWith(".yaml")) {
+    return !isHtml;
+  }
+  if (path.includes(".htaccess")) {
+    return /^(RewriteRule|RewriteCond|Options|Deny|Allow|AuthType)/mi.test(b) && !isHtml;
+  }
+  if (path.includes(".npmrc") || path.includes(".yarnrc")) {
+    return /^(registry|always-auth|\/\/)/mi.test(b) && !isHtml;
+  }
+  if (path.includes(".DS_Store")) {
+    return !isHtml && b.includes("Bud1");
+  }
+  if (path.includes("docker-compose") || path.includes(".dockerignore")) {
+    return !isHtml;
+  }
+  if (path.includes("web.config")) {
+    return /<configuration/i.test(b);
   }
   return false;
 }
@@ -1253,17 +1292,43 @@ async function testBusinessLogic(scanId: number, targetUrl: string, cookies?: st
   await log(scanId, "info", `Testing business logic for ${targetUrl}`, "logic");
 
   // Debug mode detection — check for debug endpoints and verbose headers
+  // First, fetch the SPA baseline to compare against (avoids false positives on SPA apps)
+  let spaBaseline = "";
+  try {
+    const baseResp = await httpGet(targetUrl, "/", { timeout: 5000, cookies });
+    if (isSpaFallback(baseResp.body, baseResp.headers["content-type"] || "")) {
+      spaBaseline = baseResp.body.substring(0, 500);
+    }
+  } catch { /* baseline unavailable */ }
+
   const debugPaths = ["/debug", "/__debug__", "/actuator", "/actuator/health", "/metrics", "/_profiler", "/elmah.axd", "/trace", "/server-info"];
   for (const path of debugPaths) {
     try {
       const resp = await httpGet(targetUrl, path, { timeout: 5000, cookies });
       if (resp.status >= 200 && resp.status < 400 && resp.body.length > 50) {
+        const ct = resp.headers["content-type"] || "";
+
+        // SPA fallback check: if response is the same HTML shell as /, suppress
+        if (isSpaFallback(resp.body, ct)) {
+          const respFingerprint = resp.body.substring(0, 500);
+          if (spaBaseline && respFingerprint === spaBaseline) {
+            await log(scanId, "info", `SPA fallback at ${path} (same as / baseline — suppressed)`, "logic");
+            continue;
+          }
+          // Even without baseline match, HTML shell with no debug content is likely SPA
+          const hasDebugContent = /heap|threads|actuator|metrics|profiler|stack.?trace|debug.?info/i.test(resp.body);
+          if (!hasDebugContent) {
+            await log(scanId, "info", `SPA fallback at ${path} (HTML response with no debug content — suppressed)`, "logic");
+            continue;
+          }
+        }
+
         findings.push({
           category: "Business Logic",
           severity: "medium",
           title: `Debug/diagnostic endpoint accessible: ${path}`,
-          description: `The endpoint ${path} returned a successful response, potentially exposing internal application state, metrics, or debug information.`,
-          evidence: `Path: ${path}\nStatus: ${resp.status}\nResponse length: ${resp.body.length}\nSnippet: ${resp.body.substring(0, 200)}`,
+          description: `The endpoint ${path} returned a successful response with diagnostic content, potentially exposing internal application state, metrics, or debug information.`,
+          evidence: `Path: ${path}\nStatus: ${resp.status}\nContent-Type: ${ct}\nResponse length: ${resp.body.length}\nSnippet: ${resp.body.substring(0, 200)}`,
           recommendation: "Disable or restrict access to debug and diagnostic endpoints in production. Use authentication and IP whitelisting.",
           cweId: "CWE-215",
           owaspCategory: "A05:2021 – Security Misconfiguration",
@@ -3487,10 +3552,13 @@ export async function runScan(
               await log(scanId, "info", output.substring(0, 2000), "nikto");
               const niktoLines = output.split("\n").filter((l) => l.includes("OSVDB") || l.includes("+ "));
               const metaLines: string[] = [];
+              const legacyCGILines: string[] = [];
               for (const line of niktoLines.slice(0, 50)) {
                 if (line.trim().startsWith("+")) {
                   if (isNiktoMetadataLine(line)) {
                     metaLines.push(line.replace(/^\+\s*/, "").trim());
+                  } else if (isNiktoLegacyCGI(line)) {
+                    legacyCGILines.push(line.replace(/^\+\s*/, "").trim());
                   } else {
                     toolFindings.push({
                       category: "Nikto",
@@ -3501,6 +3569,15 @@ export async function runScan(
                     });
                   }
                 }
+              }
+              if (legacyCGILines.length > 0) {
+                toolFindings.push({
+                  category: "Nikto",
+                  severity: "info",
+                  title: `Nikto legacy server probes (${legacyCGILines.length} item(s) — likely irrelevant for modern apps)`,
+                  description: `Nikto probed for legacy CGI, ASP, IIS, and FrontPage paths that are typically not present on modern Node.js/SPA stacks. These are grouped as informational.\n\n${legacyCGILines.join("\n")}`,
+                  recommendation: "No action required for modern application stacks. These probes target legacy server technologies (CGI, IIS, FrontPage, classic ASP) that are not present.",
+                });
               }
               if (metaLines.length > 0) {
                 toolFindings.push({

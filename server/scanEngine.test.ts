@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { analyzeAttackScenarios, computeTrend, calculateScore, isSpaFallback, hasFileSpecificContent, buildAuthHeader, profilePrivilegeRank, parseOsvOutput, parseTrivyOutput, scaVulnsToFindings, performLogin, extractCookies, mergeCookies, isNiktoMetadataLine, getToolAuthCapabilities, testURLNormalisationBypass, type AttackScenario, type TrendSummary, type AuthProfile, type ScaDependencyVuln, type LoginCredentials, type ScanAuthMeta } from "./scanEngine";
+import { analyzeAttackScenarios, computeTrend, calculateScore, isSpaFallback, hasFileSpecificContent, buildAuthHeader, profilePrivilegeRank, parseOsvOutput, parseTrivyOutput, scaVulnsToFindings, performLogin, extractCookies, mergeCookies, isNiktoMetadataLine, isNiktoLegacyCGI, getToolAuthCapabilities, testURLNormalisationBypass, type AttackScenario, type TrendSummary, type AuthProfile, type ScaDependencyVuln, type LoginCredentials, type ScanAuthMeta } from "./scanEngine";
 
 describe("analyzeAttackScenarios", () => {
   it("returns empty array when no findings", () => {
@@ -1045,6 +1045,94 @@ describe("isNiktoMetadataLine", () => {
 
   it("does NOT classify general finding as metadata", () => {
     expect(isNiktoMetadataLine("+ /login.php: A login page was found.")).toBe(false);
+  });
+});
+
+// ─── isNiktoLegacyCGI ────────────────────────────────────────────────────────
+
+describe("isNiktoLegacyCGI", () => {
+  it("identifies .cgi paths", () => {
+    expect(isNiktoLegacyCGI("+ OSVDB-999: /cgi-bin/test-cgi: Test CGI found")).toBe(true);
+  });
+
+  it("identifies .exe paths", () => {
+    expect(isNiktoLegacyCGI("+ OSVDB-101: /scripts/cart32.exe: Cart32 found")).toBe(true);
+  });
+
+  it("identifies classified.cgi", () => {
+    expect(isNiktoLegacyCGI("+ OSVDB-333: /classified.cgi: Classified script")).toBe(true);
+  });
+
+  it("identifies IIS/FrontPage patterns", () => {
+    expect(isNiktoLegacyCGI("+ OSVDB-444: /_vti_bin/shtml.dll: FrontPage")).toBe(true);
+  });
+
+  it("identifies .asp paths", () => {
+    expect(isNiktoLegacyCGI("+ OSVDB-555: /default.asp: ASP page found")).toBe(true);
+  });
+
+  it("does NOT flag modern web paths", () => {
+    expect(isNiktoLegacyCGI("+ OSVDB-3092: /admin/: Admin panel found")).toBe(false);
+  });
+
+  it("does NOT flag header findings", () => {
+    expect(isNiktoLegacyCGI("+ The X-Content-Type-Options header is not set")).toBe(false);
+  });
+
+  it("does NOT flag SSL/TLS findings", () => {
+    expect(isNiktoLegacyCGI("+ The site uses SSL and the Strict-Transport-Security HTTP header is not defined")).toBe(false);
+  });
+});
+
+// ─── hasFileSpecificContent expanded patterns ────────────────────────────────
+
+describe("hasFileSpecificContent (expanded)", () => {
+  it("returns true for .git/HEAD with ref:", () => {
+    expect(hasFileSpecificContent("/.git/HEAD", "ref: refs/heads/main")).toBe(true);
+  });
+
+  it("returns true for .sql with CREATE TABLE", () => {
+    expect(hasFileSpecificContent("/backup.sql", "CREATE TABLE users (id INT)")).toBe(true);
+  });
+
+  it("returns true for .sql with INSERT INTO", () => {
+    expect(hasFileSpecificContent("/dump.sql", "INSERT INTO users VALUES (1, 'admin')")).toBe(true);
+  });
+
+  it("returns false for .sql with HTML", () => {
+    expect(hasFileSpecificContent("/backup.sql", "<!doctype html><html>Not found</html>")).toBe(false);
+  });
+
+  it("returns true for .json with JSON content (non-HTML)", () => {
+    expect(hasFileSpecificContent("/config.json", '{"database":"prod","port":3306}')).toBe(true);
+  });
+
+  it("returns false for .json with HTML (SPA fallback)", () => {
+    expect(hasFileSpecificContent("/config.json", "<!doctype html><html>SPA</html>")).toBe(false);
+  });
+
+  it("returns true for .htaccess with RewriteRule", () => {
+    expect(hasFileSpecificContent("/.htaccess", "RewriteRule ^(.*)$ index.php [L]")).toBe(true);
+  });
+
+  it("returns false for .htaccess with HTML", () => {
+    expect(hasFileSpecificContent("/.htaccess", "<!doctype html><html>App</html>")).toBe(false);
+  });
+
+  it("returns true for .npmrc with registry", () => {
+    expect(hasFileSpecificContent("/.npmrc", "registry=https://npm.pkg.github.com")).toBe(true);
+  });
+
+  it("returns true for docker-compose.yml (non-HTML)", () => {
+    expect(hasFileSpecificContent("/docker-compose.yml", "version: '3'\nservices:\n  web:")).toBe(true);
+  });
+
+  it("returns false for docker-compose.yml with HTML", () => {
+    expect(hasFileSpecificContent("/docker-compose.yml", "<!doctype html><html>SPA</html>")).toBe(false);
+  });
+
+  it("returns true for web.config with <configuration>", () => {
+    expect(hasFileSpecificContent("/web.config", "<configuration><system.web>")).toBe(true);
   });
 });
 
