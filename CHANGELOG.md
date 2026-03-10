@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **SAST (Static Application Security Testing) via Semgrep**: Targets can now include a Git repository URL. During full-mode scans, the SAST module clones the repository, runs Semgrep with 1000+ community security rules, and produces findings with exact source file paths, line numbers, and code snippets. Supports JavaScript/TypeScript, Python, Java, Go, Ruby, PHP, C#, Kotlin, Rust, and more.
+- **Source code location on findings**: New `sourceFile`, `sourceLine`, and `sourceSnippet` fields on findings. SAST results link directly to the vulnerable code with surrounding context and `>>>` markers on affected lines.
+- **Repository URL on targets**: New optional `repoUrl` field on the Targets table and UI. Enables SAST when a Git URL is provided; leave blank to skip source code analysis.
+- **Ghoststrike Overview document**: Comprehensive `docs/GHOSTSTRIKE_OVERVIEW.md` covering all DAST and SAST capabilities, authenticated scanning, reporting, architecture, and getting started guide — suitable for sharing with teams and stakeholders.
 - **10 new scan tools**: AI prompt injection (PEN-27), secret/credential exposure (PEN-33), URL normalisation bypass (PEN-42), insecure HTTP client config (PEN-52), JWT security, cookie security flags, HTTP request smuggling, CRLF injection, open redirect, prototype pollution. Full-mode scans now run 28 built-in tools.
 - **Authenticated vs unauthenticated scan differentiation**: Scans track authentication mode, tag findings as pre-auth/post-auth, and reports include auth-mode banner, coverage depth table, tool auth capability matrix, and cross-mode trend warnings.
 - **Methodology & compliance docs**: `PENTEST_METHODOLOGY.md` updated with sections 4.13–4.22 for new tools, section 5 for auth-mode scanning. `COMPLIANCE_STANDARDS.md` expanded to 37 CWE IDs, updated OWASP/ATT&CK/PTES/ISO 27001 tables, 24 built-in modules documented.

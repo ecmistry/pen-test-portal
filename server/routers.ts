@@ -80,6 +80,7 @@ function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFindin
     userId: 0,
     name: "Demo Application",
     url: "https://demo.example.com",
+    repoUrl: null,
     description: "Sample target for demo report",
     tags: null,
     scanFrequency: "manual",
@@ -107,6 +108,11 @@ function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFindin
       attackTechniques: enriched.attackTechniques,
       iso27001Controls: enriched.iso27001Controls,
       poc: null,
+      affectedUrl: null,
+      affectedComponent: null,
+      sourceFile: null,
+      sourceLine: null,
+      sourceSnippet: null,
       authContext: null,
       status: "open" as const,
       createdAt: new Date(),
@@ -156,6 +162,7 @@ export const appRouter = router({
         z.object({
           name: z.string().min(1).max(255),
           url: z.string().url(),
+          repoUrl: z.string().url().optional().or(z.literal("")),
           description: z.string().optional(),
           tags: z.string().optional(),
           scanFrequency: z.enum(["manual", "daily", "weekly", "monthly"]).default("manual"),
@@ -172,6 +179,7 @@ export const appRouter = router({
           id: z.number(),
           name: z.string().min(1).max(255).optional(),
           url: z.string().url().optional(),
+          repoUrl: z.string().url().optional().or(z.literal("")).or(z.null()),
           description: z.string().optional(),
           tags: z.string().optional(),
           scanFrequency: z.enum(["manual", "daily", "weekly", "monthly"]).optional(),
@@ -270,7 +278,7 @@ export const appRouter = router({
         const loginCreds: LoginCredentials | undefined = input.loginCredentials;
 
         setImmediate(() => {
-          runScan(scanId, target.id, target.url, input.tools, input.scanMode, authConfig, input.manifestPath, loginCreds).catch(console.error);
+          runScan(scanId, target.id, target.url, input.tools, input.scanMode, authConfig, input.manifestPath, loginCreds, target.repoUrl ?? undefined).catch(console.error);
         });
 
         return { scanId, success: true };

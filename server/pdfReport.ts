@@ -188,45 +188,45 @@ export function generatePdfReport(data: ReportData): Buffer {
   } else if (isAuthenticated) {
     const body = findings.map((f, i) => [
       String(i + 1),
-      truncate(f.title, 40),
+      truncate(f.title, 36),
       f.severity.toUpperCase(),
       f.cvssScore ? Number(f.cvssScore).toFixed(1) : "—",
       (f as any).remediationPriority ?? "—",
-      truncate(f.category, 16),
+      truncate((f as any).affectedComponent ?? "—", 20),
       (f as any).authContext === "post-auth" ? "Post-auth" : (f as any).authContext === "pre-auth" ? "Pre-auth" : "—",
       (f.status ?? "open").toUpperCase(),
     ]);
     autoTable(doc, {
       startY: y,
-      head: [["#", "Title", "Severity", "CVSS", "Priority", "Category", "Auth", "Status"]],
+      head: [["#", "Title", "Severity", "CVSS", "Priority", "Component", "Auth", "Status"]],
       body,
       margin: { left: margin },
       theme: "grid",
       headStyles: { fillColor: [34, 139, 34], fontSize: 7 },
       bodyStyles: { fontSize: 7 },
-      columnStyles: { 0: { cellWidth: 6 }, 1: { cellWidth: 48 }, 2: { cellWidth: 14 }, 3: { cellWidth: 10 }, 4: { cellWidth: 12 }, 5: { cellWidth: 22 }, 6: { cellWidth: 16 }, 7: { cellWidth: 14 } },
+      columnStyles: { 0: { cellWidth: 6 }, 1: { cellWidth: 42 }, 2: { cellWidth: 14 }, 3: { cellWidth: 10 }, 4: { cellWidth: 12 }, 5: { cellWidth: 26 }, 6: { cellWidth: 16 }, 7: { cellWidth: 14 } },
       tableWidth: "wrap",
     });
     y = (doc as any).lastAutoTable.finalY + 8;
   } else {
     const body = findings.map((f, i) => [
       String(i + 1),
-      truncate(f.title, 45),
+      truncate(f.title, 40),
       f.severity.toUpperCase(),
       f.cvssScore ? Number(f.cvssScore).toFixed(1) : "—",
       (f as any).remediationPriority ?? "—",
-      truncate(f.category, 18),
+      truncate((f as any).affectedComponent ?? "—", 22),
       (f.status ?? "open").toUpperCase(),
     ]);
     autoTable(doc, {
       startY: y,
-      head: [["#", "Title", "Severity", "CVSS", "Priority", "Category", "Status"]],
+      head: [["#", "Title", "Severity", "CVSS", "Priority", "Component", "Status"]],
       body,
       margin: { left: margin },
       theme: "grid",
       headStyles: { fillColor: [255, 140, 0], fontSize: 7 },
       bodyStyles: { fontSize: 7 },
-      columnStyles: { 0: { cellWidth: 7 }, 1: { cellWidth: 58 }, 2: { cellWidth: 16 }, 3: { cellWidth: 12 }, 4: { cellWidth: 14 }, 5: { cellWidth: 30 }, 6: { cellWidth: 18 } },
+      columnStyles: { 0: { cellWidth: 7 }, 1: { cellWidth: 50 }, 2: { cellWidth: 16 }, 3: { cellWidth: 12 }, 4: { cellWidth: 14 }, 5: { cellWidth: 30 }, 6: { cellWidth: 18 } },
       tableWidth: "wrap",
     });
     y = (doc as any).lastAutoTable.finalY + 8;
@@ -258,6 +258,9 @@ export function generatePdfReport(data: ReportData): Buffer {
       const techniques = f.attackTechniques as AttackTechnique[] | null;
       if (techniques?.length) meta.push(`ATT&CK: ${techniques.map((t) => t.techniqueId).join(", ")}`);
       if (meta.length > 0) addParagraph(meta.join(" | "), 500);
+      if ((f as any).affectedUrl) addParagraph(`Affected URL: ${(f as any).affectedUrl}`, 300);
+      if ((f as any).affectedComponent) addParagraph(`Affected Component: ${(f as any).affectedComponent}`, 200);
+      if ((f as any).sourceFile) addParagraph(`Source: ${(f as any).sourceFile}${(f as any).sourceLine ? `:${(f as any).sourceLine}` : ""}`, 300);
       if (f.description) addParagraph(f.description, 400);
       const bizImpact = f.businessImpact as BusinessImpact | null;
       if (bizImpact) addParagraph(`Business Impact: Financial=${bizImpact.financial}, Operational=${bizImpact.operational}, Reputational=${bizImpact.reputational}, Legal=${bizImpact.legal}`, 400);

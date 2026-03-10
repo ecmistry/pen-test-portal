@@ -295,6 +295,13 @@ export default function ScanDetail() {
                               {f.category}{f.cweId ? ` · ${f.cweId}` : ""}{f.owaspCategory ? ` · ${f.owaspCategory}` : ""}
                               {f.remediationComplexity ? ` · ${f.remediationComplexity} complexity` : ""}
                             </div>
+                            {(f.affectedComponent || f.affectedUrl) && (
+                              <div className="text-xs text-cyan-400/80 mt-0.5 truncate">
+                                {f.affectedComponent && <span className="font-medium">{f.affectedComponent}</span>}
+                                {f.affectedComponent && f.affectedUrl && <span className="text-muted-foreground"> — </span>}
+                                {f.affectedUrl && <code className="text-cyan-400/60">{f.affectedUrl}</code>}
+                              </div>
+                            )}
                           </div>
                           <div className="flex items-center gap-2 shrink-0">
                             <select
@@ -335,6 +342,37 @@ export default function ScanDetail() {
                                 {f.iso27001Controls && Array.isArray(f.iso27001Controls) && f.iso27001Controls.length > 0 && (
                                   <div><span className="font-medium text-foreground/70">ISO 27001:</span> {f.iso27001Controls.join(", ")}</div>
                                 )}
+                              </div>
+                            )}
+                            {(f.affectedUrl || f.affectedComponent) && (
+                              <div className="bg-cyan-950/30 border border-cyan-900/30 rounded-lg p-3">
+                                <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1.5">Affected Location</div>
+                                <div className="space-y-1">
+                                  {f.affectedComponent && (
+                                    <div className="flex items-center gap-2 text-xs">
+                                      <span className="text-muted-foreground w-20 shrink-0">Component:</span>
+                                      <span className="text-cyan-400 font-medium">{f.affectedComponent}</span>
+                                    </div>
+                                  )}
+                                  {f.affectedUrl && (
+                                    <div className="flex items-center gap-2 text-xs">
+                                      <span className="text-muted-foreground w-20 shrink-0">URL:</span>
+                                      <code className="text-cyan-300/80 font-mono break-all">{f.affectedUrl}</code>
+                                    </div>
+                                  )}
+                                  {f.sourceFile && (
+                                    <div className="flex items-center gap-2 text-xs">
+                                      <span className="text-muted-foreground w-20 shrink-0">Source:</span>
+                                      <code className="text-amber-400 font-mono">{f.sourceFile}{f.sourceLine ? `:${f.sourceLine}` : ""}</code>
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                            {f.sourceSnippet && (
+                              <div>
+                                <div className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1">Source Code</div>
+                                <pre className="text-xs bg-black/50 text-amber-300/90 rounded-lg p-3 overflow-x-auto font-mono whitespace-pre leading-relaxed">{f.sourceSnippet}</pre>
                               </div>
                             )}
                             {f.description && (

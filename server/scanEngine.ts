@@ -81,6 +81,16 @@ interface Finding {
   recommendation?: string;
   cweId?: string;
   owaspCategory?: string;
+  /** The specific URL or endpoint where the issue was detected */
+  affectedUrl?: string;
+  /** The application component affected (e.g. "HTTP Response Headers", "Login Page") */
+  affectedComponent?: string;
+  /** Source file path (from SAST analysis) */
+  sourceFile?: string;
+  /** Source line number (from SAST analysis) */
+  sourceLine?: number;
+  /** Source code snippet around the issue (from SAST analysis) */
+  sourceSnippet?: string;
   /** Structured proof-of-concept for reproducibility */
   poc?: {
     curlCommand: string;
@@ -132,6 +142,7 @@ const TOOL_AUTH_CAPABILITIES: Record<string, ToolAuthCapability> = {
   tls:          { tool: "tls",          authSupport: "none",    note: "TLS analysis operates at the transport layer, independent of authentication" },
   "auth-roles": { tool: "auth-roles",   authSupport: "full",    note: "Designed for authenticated multi-role privilege escalation testing" },
   sca:          { tool: "sca",          authSupport: "none",    note: "Dependency scanning analyses manifests, not HTTP traffic" },
+  sast:         { tool: "sast",         authSupport: "none",    note: "Static analysis scans source code, independent of HTTP traffic" },
   nikto:        { tool: "nikto",        authSupport: "limited", note: "Nikto does not perform authenticated crawling of post-login application surfaces" },
   nuclei:       { tool: "nuclei",       authSupport: "limited", note: "Nuclei templates have limited authenticated scanning support" },
   wapiti:       { tool: "wapiti",       authSupport: "limited", note: "Wapiti has limited session-based authenticated crawling" },
@@ -482,6 +493,8 @@ async function testSecurityHeaders(scanId: number, targetUrl: string, cookies?: 
           recommendation: h.recommendation,
           cweId: h.cwe,
           owaspCategory: h.owasp,
+          affectedUrl: targetUrl,
+          affectedComponent: "HTTP Response Headers",
         });
         await log(scanId, "warn", `MISSING: ${h.name}`, "headers");
       } else {
@@ -505,6 +518,8 @@ async function testSecurityHeaders(scanId: number, targetUrl: string, cookies?: 
               recommendation: "Remove 'unsafe-inline' and 'unsafe-eval' from script-src. Use nonces or hashes instead.",
               cweId: "CWE-693",
               owaspCategory: "A05:2021 – Security Misconfiguration",
+              affectedUrl: targetUrl,
+              affectedComponent: "Content-Security-Policy Header",
             });
           } else if (scriptUsesNonce) {
             // Strong script protection; style exceptions are lower risk — skip or downgrade
@@ -518,6 +533,8 @@ async function testSecurityHeaders(scanId: number, targetUrl: string, cookies?: 
               recommendation: "Use nonces for style-src-elem where possible. style-src-attr 'unsafe-inline' may be required by widgets.",
               cweId: "CWE-693",
               owaspCategory: "A05:2021 – Security Misconfiguration",
+              affectedUrl: targetUrl,
+              affectedComponent: "Content-Security-Policy Header",
             });
           } else if (hasStyleSrcUnsafe) {
             findings.push({
@@ -529,6 +546,8 @@ async function testSecurityHeaders(scanId: number, targetUrl: string, cookies?: 
               recommendation: "Consider using nonces for style-src-elem. style-src-attr 'unsafe-inline' may be required by some widgets.",
               cweId: "CWE-693",
               owaspCategory: "A05:2021 – Security Misconfiguration",
+              affectedUrl: targetUrl,
+              affectedComponent: "Content-Security-Policy Header",
             });
           }
         }
@@ -547,6 +566,8 @@ async function testSecurityHeaders(scanId: number, targetUrl: string, cookies?: 
         recommendation: "Configure the server to suppress or genericise the Server header.",
         cweId: "CWE-200",
         owaspCategory: "A05:2021 – Security Misconfiguration",
+        affectedUrl: targetUrl,
+        affectedComponent: "Server Response Header",
       });
     }
 
@@ -559,6 +580,8 @@ async function testSecurityHeaders(scanId: number, targetUrl: string, cookies?: 
       title: "Could not reach target for header inspection",
       description: `The scanner could not connect to the target: ${err.message}`,
       recommendation: "Ensure the target URL is accessible from the scanner.",
+      affectedUrl: targetUrl,
+      affectedComponent: "Network Connectivity",
     });
   }
 
@@ -647,6 +670,8 @@ async function testAuthentication(scanId: number, targetUrl: string, scanMode: S
         recommendation: "Return identical error messages and status codes for both valid and invalid credentials.",
         cweId: "CWE-203",
         owaspCategory: "A07:2021 – Identification and Authentication Failures",
+        affectedUrl: `${targetUrl}${testEndpoint}`,
+        affectedComponent: "Login / Authentication Endpoint",
       });
       await log(scanId, "warn", "Potential account enumeration detected", "auth");
     } else {
@@ -686,6 +711,8 @@ async function testAuthentication(scanId: number, targetUrl: string, scanMode: S
         recommendation: "Implement account lockout after 3-5 failed attempts, rate limiting (e.g. 5 attempts per 15 minutes), and consider CAPTCHA. If the scanner tested a non-login path, configure the correct login endpoint in the target settings.",
         cweId: "CWE-307",
         owaspCategory: "A07:2021 – Identification and Authentication Failures",
+        affectedUrl: `${targetUrl}${testEndpoint}`,
+        affectedComponent: "Login / Authentication Endpoint",
       });
       await log(scanId, "warn", `No brute force protection detected (tested: POST ${testEndpoint})`, "auth");
     }
@@ -794,6 +821,8 @@ async function testSQLInjection(scanId: number, targetUrl: string, scanMode: Sca
                 "3. Confirm the application interpolates user input into SQL queries",
               ],
             },
+            affectedUrl: `${targetUrl}${path}`,
+            affectedComponent: "SQL Query Handler",
           });
           await log(scanId, "error", `SQL injection evidence found at ${path}`, "sqli");
           break;
@@ -835,6 +864,8 @@ async function testSQLInjection(scanId: number, targetUrl: string, scanMode: Sca
                   "3. A delay confirms the SQL SLEEP/WAITFOR payload executed server-side",
                 ],
               },
+              affectedUrl: `${targetUrl}${path}`,
+              affectedComponent: "SQL Query Handler",
             });
             await log(scanId, "error", `Time-based SQLi detected at ${path}`, "sqli");
             break;
@@ -925,6 +956,8 @@ async function testXSS(scanId: number, targetUrl: string, scanMode: ScanMode, co
                 "3. Confirm user input is reflected without encoding",
               ],
             },
+            affectedUrl: `${targetUrl}${path}`,
+            affectedComponent: "Input Reflection / Rendering",
           });
           await log(scanId, "error", `Reflected XSS found at ${path}`, "xss");
           break;
@@ -1067,6 +1100,8 @@ async function testIntelligenceGathering(scanId: number, targetUrl: string, scan
             recommendation: `Restrict access to ${path}. Remove sensitive files from web root.`,
             cweId: "CWE-538",
             owaspCategory: "A05:2021 – Security Misconfiguration",
+            affectedUrl: `${targetUrl}${path}`,
+            affectedComponent: "Sensitive File Exposure",
           });
           await log(scanId, "error", `CRITICAL: ${name} exposed at ${path}`, "recon");
         } else {
@@ -1086,6 +1121,8 @@ async function testIntelligenceGathering(scanId: number, targetUrl: string, scan
           recommendation: `Immediately restrict access to ${path}. Remove from web root.`,
           cweId: "CWE-538",
           owaspCategory: "A05:2021 – Security Misconfiguration",
+          affectedUrl: `${targetUrl}${path}`,
+          affectedComponent: "Sensitive File Exposure",
         });
         await log(scanId, "error", `CRITICAL: ${name} exposed at ${path}`, "recon");
       } else if (!critical) {
@@ -1096,6 +1133,8 @@ async function testIntelligenceGathering(scanId: number, targetUrl: string, scan
           description: `${name} found at ${path}. Review whether it should be publicly accessible.`,
           evidence: `HTTP ${status}`,
           recommendation: `Review exposure of ${path}.`,
+          affectedUrl: `${targetUrl}${path}`,
+          affectedComponent: "Public Metadata",
         });
         await log(scanId, "info", `Found: ${name} at ${path} (HTTP ${status})`, "recon");
       }
@@ -1135,6 +1174,8 @@ async function testCORS(scanId: number, targetUrl: string, cookies?: string): Pr
         recommendation: "Use a whitelist of allowed origins. Never combine wildcard with credentials.",
         cweId: "CWE-942",
         owaspCategory: "A05:2021 – Security Misconfiguration",
+        affectedUrl: targetUrl,
+        affectedComponent: "CORS Configuration",
       });
     } else if (acao === "https://evil-attacker.com") {
       findings.push({
@@ -1341,6 +1382,8 @@ async function testBusinessLogic(scanId: number, targetUrl: string, cookies?: st
               "2. Observe the debug/diagnostic information in the response",
             ],
           },
+          affectedUrl: `${targetUrl}${path}`,
+          affectedComponent: "Debug / Administration Endpoint",
         });
         await log(scanId, "warn", `Debug endpoint found: ${path} (${resp.status})`, "logic");
       }
@@ -1362,6 +1405,8 @@ async function testBusinessLogic(scanId: number, targetUrl: string, cookies?: st
           recommendation: `Remove or suppress the ${hdr} header in production to reduce information disclosure.`,
           cweId: "CWE-200",
           owaspCategory: "A05:2021 – Security Misconfiguration",
+          affectedUrl: targetUrl,
+          affectedComponent: "Debug / Administration Endpoint",
         });
       }
     }
@@ -1385,6 +1430,8 @@ async function testBusinessLogic(scanId: number, targetUrl: string, cookies?: st
         recommendation: "Implement CSRF protection on all state-changing forms. Use a framework-provided CSRF middleware.",
         cweId: "CWE-352",
         owaspCategory: "A01:2021 – Broken Access Control",
+        affectedUrl: `${targetUrl}/login`,
+        affectedComponent: "Authentication / Access Control",
       });
     }
   } catch { /* continue */ }
@@ -1423,6 +1470,8 @@ async function testBusinessLogic(scanId: number, targetUrl: string, cookies?: st
                 "3. Confirm that the server accepted the escalated privilege fields",
               ],
             },
+            affectedUrl: `${targetUrl}${path}`,
+            affectedComponent: "Input Binding / Mass Assignment",
           });
         }
       }
@@ -1446,6 +1495,8 @@ async function testBusinessLogic(scanId: number, targetUrl: string, cookies?: st
             recommendation: "Configure custom error pages for production. Never expose stack traces or internal errors to end users.",
             cweId: "CWE-209",
             owaspCategory: "A05:2021 – Security Misconfiguration",
+            affectedUrl: targetUrl,
+            affectedComponent: "Error Handling",
           });
           break;
         }
@@ -1592,12 +1643,14 @@ async function testGraphQL(scanId: number, targetUrl: string, cookies?: string):
           curlCommand: buildCurlCommand(targetUrl, detectedPath, { method: "POST", body: introspectionQuery, headers: { "Content-Type": "application/json" } }),
           requestRaw: buildRawRequest(targetUrl, detectedPath, { method: "POST", body: introspectionQuery, headers: { "Content-Type": "application/json" } }),
           responseSnippet: resp.body.substring(0, 500),
-          reproductionSteps: [
-            `1. Send POST to ${targetUrl}${detectedPath} with body: ${introspectionQuery}`,
-            "2. Observe the full schema is returned, including all types, queries, and mutations",
-          ],
-        },
-      });
+            reproductionSteps: [
+              `1. Send POST to ${targetUrl}${detectedPath} with body: ${introspectionQuery}`,
+              "2. Observe the full schema is returned, including all types, queries, and mutations",
+            ],
+          },
+          affectedUrl: `${targetUrl}${detectedPath}`,
+          affectedComponent: "GraphQL API",
+        });
     }
   } catch { /* continue */ }
 
@@ -1630,6 +1683,8 @@ async function testGraphQL(scanId: number, targetUrl: string, cookies?: string):
           recommendation: "Limit the number of operations per GraphQL request. Implement query cost analysis and rate limiting.",
           cweId: "CWE-770",
           owaspCategory: "A04:2021 – Insecure Design",
+          affectedUrl: `${targetUrl}${detectedPath}`,
+          affectedComponent: "GraphQL API",
         });
       }
     }
@@ -1667,6 +1722,8 @@ async function testGraphQL(scanId: number, targetUrl: string, cookies?: string):
               "2. Observe SQL error in the response",
             ],
           },
+          affectedUrl: `${targetUrl}${detectedPath}`,
+          affectedComponent: "GraphQL API",
         });
         break;
       }
@@ -1776,6 +1833,8 @@ async function testSSLTLS(scanId: number, targetUrl: string, _cookies?: string):
         recommendation: "Disable TLS 1.0 and 1.1. Require TLS 1.2 or 1.3 minimum.",
         cweId: "CWE-326",
         owaspCategory: "A02:2021 – Cryptographic Failures",
+        affectedUrl: targetUrl,
+        affectedComponent: "TLS / SSL Configuration",
       });
     } else if (proto.includes("tlsv1.1")) {
       findings.push({
@@ -1787,6 +1846,8 @@ async function testSSLTLS(scanId: number, targetUrl: string, _cookies?: string):
         recommendation: "Disable TLS 1.1. Require TLS 1.2 or 1.3 minimum.",
         cweId: "CWE-326",
         owaspCategory: "A02:2021 – Cryptographic Failures",
+        affectedUrl: targetUrl,
+        affectedComponent: "TLS / SSL Configuration",
       });
     } else {
       await log(scanId, "success", `TLS version: ${certInfo.protocol} (acceptable)`, "tls");
@@ -1804,6 +1865,8 @@ async function testSSLTLS(scanId: number, targetUrl: string, _cookies?: string):
         recommendation: "Configure the server to use only strong cipher suites (AES-GCM, ChaCha20-Poly1305). Disable RC4, DES, 3DES, and export ciphers.",
         cweId: "CWE-326",
         owaspCategory: "A02:2021 – Cryptographic Failures",
+        affectedUrl: targetUrl,
+        affectedComponent: "TLS / SSL Configuration",
       });
     }
 
@@ -1823,6 +1886,8 @@ async function testSSLTLS(scanId: number, targetUrl: string, _cookies?: string):
           recommendation: "Renew the SSL certificate immediately.",
           cweId: "CWE-295",
           owaspCategory: "A02:2021 – Cryptographic Failures",
+          affectedUrl: targetUrl,
+          affectedComponent: "TLS / SSL Configuration",
         });
       } else if (daysUntilExpiry < 30) {
         findings.push({
@@ -1834,6 +1899,8 @@ async function testSSLTLS(scanId: number, targetUrl: string, _cookies?: string):
           recommendation: "Renew the SSL certificate before expiry. Consider automated renewal (e.g. Let's Encrypt with certbot).",
           cweId: "CWE-295",
           owaspCategory: "A02:2021 – Cryptographic Failures",
+          affectedUrl: targetUrl,
+          affectedComponent: "TLS / SSL Configuration",
         });
       } else {
         await log(scanId, "success", `Certificate valid for ${daysUntilExpiry} days (expires ${certInfo.cert.valid_to})`, "tls");
@@ -1855,6 +1922,8 @@ async function testSSLTLS(scanId: number, targetUrl: string, _cookies?: string):
           recommendation: "Use a certificate from a trusted Certificate Authority (e.g. Let's Encrypt).",
           cweId: "CWE-295",
           owaspCategory: "A02:2021 – Cryptographic Failures",
+          affectedUrl: targetUrl,
+          affectedComponent: "TLS / SSL Configuration",
         });
       }
     }
@@ -1896,6 +1965,8 @@ async function testSSLTLS(scanId: number, targetUrl: string, _cookies?: string):
               recommendation: "Review and remediate the TLS configuration issue identified by testssl.sh.",
               cweId: "CWE-326",
               owaspCategory: "A02:2021 – Cryptographic Failures",
+              affectedUrl: targetUrl,
+              affectedComponent: "TLS / SSL Configuration",
             });
           }
         }
@@ -2233,6 +2304,8 @@ async function testAIPromptInjection(scanId: number, targetUrl: string, cookies?
               recommendation: "Implement input preprocessing to detect jailbreak patterns. Use a prompt injection classifier (e.g. Llama-Prompt-Guard) before passing input to the LLM. Add output filtering to detect system prompt leakage.",
               cweId: "CWE-77",
               owaspCategory: "A03:2021 – Injection",
+              affectedUrl: `${targetUrl}${path}`,
+              affectedComponent: "AI / LLM Input Handler",
             });
           }
         }
@@ -2262,6 +2335,8 @@ async function testAIPromptInjection(scanId: number, targetUrl: string, cookies?
               recommendation: "Add input preprocessing to collapse obfuscated text before classification: normalise underscores, spaces, dots, and leetspeak characters. Apply regex-based normalisation before the AI guardrail model evaluates the input.",
               cweId: "CWE-693",
               owaspCategory: "A07:2021 – Identification and Authentication Failures",
+              affectedUrl: `${targetUrl}${path}`,
+              affectedComponent: "AI / LLM Input Handler",
             });
             break;
           }
@@ -2541,6 +2616,8 @@ export async function testJWTSecurity(scanId: number, targetUrl: string, cookies
             recommendation: "Reject JWTs with alg:'none'. Enforce a whitelist of allowed algorithms server-side (e.g. RS256 only). Never trust the algorithm from the token header.",
             cweId: "CWE-327",
             owaspCategory: "A02:2021 – Cryptographic Failures",
+            affectedUrl: targetUrl,
+            affectedComponent: "JWT / Token Handling",
           });
           break;
         }
@@ -2571,6 +2648,8 @@ export async function testJWTSecurity(scanId: number, targetUrl: string, cookies
                 recommendation: "Validate the 'exp' claim on every request. Reject tokens that have expired. Implement short-lived access tokens with refresh token rotation.",
                 cweId: "CWE-613",
                 owaspCategory: "A07:2021 – Identification and Authentication Failures",
+                affectedUrl: targetUrl,
+                affectedComponent: "JWT / Token Handling",
               });
               break;
             }
@@ -2593,6 +2672,8 @@ export async function testJWTSecurity(scanId: number, targetUrl: string, cookies
         recommendation: "Use asymmetric signing (RS256 or ES256) instead of HMAC for API tokens. If HMAC is required, use a secret of at least 256 bits generated from a CSPRNG.",
         cweId: "CWE-326",
         owaspCategory: "A02:2021 – Cryptographic Failures",
+        affectedUrl: targetUrl,
+        affectedComponent: "JWT / Token Handling",
       });
     }
   } catch { /* malformed header */ }
@@ -2633,6 +2714,8 @@ async function testCookieSecurity(scanId: number, targetUrl: string, cookies?: s
             recommendation: "Add the HttpOnly flag to all session and authentication cookies to prevent client-side JavaScript access.",
             cweId: "CWE-1004",
             owaspCategory: "A05:2021 – Security Misconfiguration",
+            affectedUrl: targetUrl,
+            affectedComponent: "Cookie Configuration",
           });
         }
 
@@ -2646,6 +2729,8 @@ async function testCookieSecurity(scanId: number, targetUrl: string, cookies?: s
             recommendation: "Add the Secure flag to all cookies set over HTTPS to prevent transmission over unencrypted connections.",
             cweId: "CWE-614",
             owaspCategory: "A05:2021 – Security Misconfiguration",
+            affectedUrl: targetUrl,
+            affectedComponent: "Cookie Configuration",
           });
         }
 
@@ -2659,6 +2744,8 @@ async function testCookieSecurity(scanId: number, targetUrl: string, cookies?: s
             recommendation: "Set SameSite=Strict or SameSite=Lax on session cookies to mitigate CSRF attacks.",
             cweId: "CWE-1275",
             owaspCategory: "A01:2021 – Broken Access Control",
+            affectedUrl: targetUrl,
+            affectedComponent: "Cookie Configuration",
           });
         }
       }
@@ -2733,6 +2820,8 @@ async function testHTTPSmuggling(scanId: number, targetUrl: string, _cookies?: s
               recommendation: "Ensure front-end and back-end servers agree on request boundaries. Disable Transfer-Encoding: chunked if not needed, or normalise it consistently. Use HTTP/2 end-to-end to eliminate HTTP/1.1 smuggling vectors.",
               cweId: "CWE-444",
               owaspCategory: "A05:2021 – Security Misconfiguration",
+              affectedUrl: targetUrl,
+              affectedComponent: "HTTP Request Parser",
             });
           }
           if (data.includes("smuggle-probe") || data.includes("GPOST")) {
@@ -2745,6 +2834,8 @@ async function testHTTPSmuggling(scanId: number, targetUrl: string, _cookies?: s
               recommendation: "Immediately investigate request parsing between the front-end proxy and back-end server. Normalise Transfer-Encoding handling. Consider disabling connection reuse or upgrading to HTTP/2 end-to-end.",
               cweId: "CWE-444",
               owaspCategory: "A05:2021 – Security Misconfiguration",
+              affectedUrl: targetUrl,
+              affectedComponent: "HTTP Request Parser",
             });
           }
           resolve();
@@ -2799,6 +2890,8 @@ async function testCRLFInjection(scanId: number, targetUrl: string, cookies?: st
             recommendation: "Strip or reject \\r\\n (CR/LF) characters from all user input before including it in HTTP response headers. Use framework-level response header encoding.",
             cweId: "CWE-93",
             owaspCategory: "A03:2021 – Injection",
+            affectedUrl: `${targetUrl}${path}`,
+            affectedComponent: "HTTP Header Handling",
           });
           break;
         }
@@ -2848,6 +2941,8 @@ async function testOpenRedirect(scanId: number, targetUrl: string, cookies?: str
               recommendation: "Validate redirect destinations against a whitelist of allowed domains. Reject absolute URLs and protocol-relative URLs (//evil.com). Use relative paths for redirects where possible.",
               cweId: "CWE-601",
               owaspCategory: "A01:2021 – Broken Access Control",
+              affectedUrl: `${targetUrl}${path}`,
+              affectedComponent: "Redirect Handler",
             });
             return findings; // one finding per target is sufficient
           }
@@ -2896,6 +2991,8 @@ async function testPrototypePollution(scanId: number, targetUrl: string, cookies
               recommendation: "Sanitise JSON input to reject keys like '__proto__', 'constructor', and 'prototype'. Use Object.create(null) for safe object creation. Consider using a JSON schema validator that blocks prototype pollution keys.",
               cweId: "CWE-1321",
               owaspCategory: "A03:2021 – Injection",
+              affectedUrl: `${targetUrl}${path}`,
+              affectedComponent: "JSON Input Parser",
             });
             break;
           }
@@ -2923,6 +3020,8 @@ async function testPrototypePollution(scanId: number, targetUrl: string, cookies
                   recommendation: "Sanitise JSON input to reject '__proto__' and 'constructor.prototype' keys. Use Object.create(null) for safe maps.",
                   cweId: "CWE-1321",
                   owaspCategory: "A03:2021 – Injection",
+                  affectedUrl: `${targetUrl}${path}`,
+                  affectedComponent: "JSON Input Parser",
                 });
                 break;
               }
@@ -2993,6 +3092,169 @@ async function testSCA(scanId: number, manifestPath: string): Promise<Finding[]>
     description: "Neither osv-scanner nor trivy is installed. Dependency vulnerability scanning was skipped.",
     recommendation: "Install osv-scanner (npm i -g @google/osv-scanner) or trivy for SCA capability.",
   }];
+}
+
+// ─── SAST (Static Application Security Testing) via Semgrep ──────────────────
+
+export async function testSAST(scanId: number, repoUrl: string, targetUrl: string): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  const fs = await import("fs");
+  const { execSync } = await import("child_process");
+  const path = await import("path");
+
+  await log(scanId, "info", `SAST scan: cloning repository ${repoUrl}`, "sast");
+
+  const cloneDir = `/tmp/sast-scan-${scanId}`;
+  try {
+    if (fs.existsSync(cloneDir)) fs.rmSync(cloneDir, { recursive: true, force: true });
+
+    let semgrepCmd = "semgrep";
+    try {
+      execSync("which semgrep", { stdio: "ignore" });
+    } catch {
+      await log(scanId, "warn", "Semgrep not installed. Install: pip3 install semgrep", "sast");
+      findings.push({
+        category: "Tool Availability",
+        severity: "info",
+        title: "Semgrep (SAST) not available",
+        description: "Semgrep is not installed on the scan server. Install to enable static code analysis with source-level findings.",
+        recommendation: "Install Semgrep: pip3 install semgrep",
+        affectedUrl: targetUrl,
+        affectedComponent: "Tool Availability",
+      });
+      return findings;
+    }
+
+    execSync(`git clone --depth 1 --single-branch ${repoUrl} ${cloneDir}`, {
+      timeout: 60000,
+      encoding: "utf8",
+      stdio: "pipe",
+    });
+    await log(scanId, "info", "Repository cloned successfully. Running Semgrep analysis...", "sast");
+
+    let output = "";
+    try {
+      const result = execSync(
+        `${semgrepCmd} --config auto --json --severity WARNING --severity ERROR --timeout 30 ${cloneDir} 2>/dev/null`,
+        { timeout: 300000, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }
+      );
+      output = result;
+    } catch (err: any) {
+      output = err.stdout ?? "";
+      if (!output) {
+        await log(scanId, "warn", `Semgrep scan error: ${err.message?.substring(0, 200)}`, "sast");
+      }
+    }
+
+    if (!output) {
+      await log(scanId, "info", "Semgrep produced no output", "sast");
+      return findings;
+    }
+
+    let parsed: { results?: any[]; errors?: any[] };
+    try {
+      parsed = JSON.parse(output);
+    } catch {
+      await log(scanId, "warn", "Failed to parse Semgrep JSON output", "sast");
+      return findings;
+    }
+
+    const results = parsed.results ?? [];
+    await log(scanId, "info", `Semgrep found ${results.length} result(s). Processing...`, "sast");
+
+    const sevMap: Record<string, Finding["severity"]> = {
+      ERROR: "high",
+      WARNING: "medium",
+      INFO: "low",
+    };
+
+    for (const r of results.slice(0, 100)) {
+      const filePath = (r.path as string).replace(cloneDir + "/", "");
+      const startLine = r.start?.line ?? 0;
+      const endLine = r.end?.line ?? startLine;
+      const extra = r.extra ?? {};
+      const metadata = extra.metadata ?? {};
+
+      const severity = sevMap[extra.severity] ?? "medium";
+      const message = extra.message ?? r.check_id ?? "Unknown finding";
+      const checkId = r.check_id ?? "";
+
+      const cweList = metadata.cwe as string[] | undefined;
+      let cweId: string | undefined;
+      if (cweList?.length) {
+        const match = cweList[0].match(/CWE-\d+/);
+        if (match) cweId = match[0];
+      }
+
+      const owaspList = metadata.owasp as string[] | undefined;
+      const owaspCategory = owaspList?.length ? owaspList[0] : undefined;
+
+      let snippet = "";
+      try {
+        const fileContent = fs.readFileSync(path.join(cloneDir, filePath), "utf8");
+        const allLines = fileContent.split("\n");
+        const contextStart = Math.max(0, startLine - 3);
+        const contextEnd = Math.min(allLines.length, endLine + 2);
+        snippet = allLines.slice(contextStart, contextEnd)
+          .map((line, i) => {
+            const lineNum = contextStart + i + 1;
+            const marker = (lineNum >= startLine && lineNum <= endLine) ? ">>>" : "   ";
+            return `${marker} ${String(lineNum).padStart(4)} | ${line}`;
+          })
+          .join("\n");
+      } catch { /* file read failed */ }
+
+      const vulnClass = (metadata.vulnerability_class as string[] | undefined)?.join(", ") ?? "";
+      const confidence = metadata.confidence ?? "";
+      const ruleSource = metadata.source ?? "";
+
+      findings.push({
+        category: "SAST",
+        severity,
+        title: `[SAST] ${vulnClass || checkId.split(".").pop() || "Security Issue"} in ${filePath}:${startLine}`,
+        description: message,
+        evidence: `Rule: ${checkId}\nFile: ${filePath}\nLines: ${startLine}-${endLine}${confidence ? `\nConfidence: ${confidence}` : ""}${ruleSource ? `\nRule source: ${ruleSource}` : ""}`,
+        recommendation: metadata.references?.length
+          ? `Review and fix the identified issue. References: ${(metadata.references as string[]).slice(0, 3).join(", ")}`
+          : "Review and fix the identified code pattern. Consult the Semgrep rule documentation for remediation guidance.",
+        cweId,
+        owaspCategory,
+        affectedUrl: targetUrl,
+        affectedComponent: `Source Code: ${filePath}`,
+        sourceFile: filePath,
+        sourceLine: startLine,
+        sourceSnippet: snippet,
+      });
+    }
+
+    if (results.length > 100) {
+      await log(scanId, "info", `Semgrep produced ${results.length} results; showing top 100`, "sast");
+    }
+    await log(scanId, "info", `SAST scan complete: ${findings.length} finding(s)`, "sast");
+  } catch (err: any) {
+    const msg = err.message?.substring(0, 300) ?? "Unknown error";
+    if (msg.includes("Repository not found") || msg.includes("Could not resolve") || msg.includes("fatal:")) {
+      await log(scanId, "warn", `SAST: Failed to clone repository — ${msg}`, "sast");
+      findings.push({
+        category: "SAST",
+        severity: "info",
+        title: "SAST scan failed — repository not accessible",
+        description: `Could not clone repository: ${repoUrl}. Ensure the URL is correct and the repository is accessible (public or with configured credentials).`,
+        recommendation: "Verify the repository URL in the target settings. For private repositories, configure SSH keys or access tokens on the scanner.",
+        affectedUrl: repoUrl,
+        affectedComponent: "Repository Access",
+      });
+    } else {
+      await log(scanId, "warn", `SAST scan error: ${msg}`, "sast");
+    }
+  } finally {
+    try {
+      const fs2 = await import("fs");
+      if (fs2.existsSync(cloneDir)) fs2.rmSync(cloneDir, { recursive: true, force: true });
+    } catch { /* cleanup best-effort */ }
+  }
+
+  return findings;
 }
 
 // ─── Authenticated Multi-Role Scanning ───────────────────────────────────────
@@ -3353,6 +3615,7 @@ export async function runScan(
   authConfig?: AuthScanConfig,
   manifestPath?: string,
   loginCredentials?: LoginCredentials,
+  repoUrl?: string,
 ): Promise<void> {
   await log(scanId, "info", `=== PenTest Portal Scan Started ===`, "init");
   await log(scanId, "info", `Target: ${targetUrl}`, "init");
@@ -3406,7 +3669,7 @@ export async function runScan(
   // Full mode: add extra tools (cors, traversal, config) and external tools (nikto, nuclei, zap)
   const toolsToRun = Array.from(new Set(toolList.map((t) => t.toLowerCase().trim())));
   if (scanMode === "full") {
-    for (const t of ["cors", "traversal", "config", "logic", "graphql", "ssrf", "tls", "auth-roles", "sca", "ai-prompt", "secret-leak", "url-norm", "http-client", "jwt", "cookie-flags", "smuggling", "crlf", "redirect", "proto-pollution", "nikto", "nuclei", "wapiti", "zap"]) {
+    for (const t of ["cors", "traversal", "config", "logic", "graphql", "ssrf", "tls", "auth-roles", "sca", "sast", "ai-prompt", "secret-leak", "url-norm", "http-client", "jwt", "cookie-flags", "smuggling", "crlf", "redirect", "proto-pollution", "nikto", "nuclei", "wapiti", "zap"]) {
       if (!toolsToRun.includes(t)) toolsToRun.push(t);
     }
   }
@@ -3467,6 +3730,13 @@ export async function runScan(
             toolFindings = await testSCA(scanId, manifestPath);
           } else {
             await log(scanId, "info", "SCA scan skipped: no manifest path provided (use --deps flag)", "sca");
+          }
+          break;
+        case "sast":
+          if (repoUrl) {
+            toolFindings = await testSAST(scanId, repoUrl, targetUrl);
+          } else {
+            await log(scanId, "info", "SAST scan skipped: no repository URL configured on the target. Add a Git repository URL in Target settings to enable source code analysis.", "sast");
           }
           break;
         case "ai-prompt":
@@ -3586,6 +3856,8 @@ export async function runScan(
                   title: "Nikto Scan Summary",
                   description: metaLines.join("\n"),
                   recommendation: "Informational — no action required. This entry summarises Nikto scan metadata.",
+                  affectedUrl: targetUrl,
+                  affectedComponent: "Scan Metadata (Nikto)",
                 });
               }
             }
@@ -3598,6 +3870,8 @@ export async function runScan(
                 title: "Nikto scanner not available",
                 description: "Nikto is not installed on the scan server. Install it to enable web server vulnerability scanning.",
                 recommendation: "Clone https://github.com/sullo/nikto to /opt/nikto and add a nikto wrapper in /usr/local/bin.",
+                affectedUrl: targetUrl,
+                affectedComponent: "Tool Availability",
               });
             } else {
               const msg = (err as Error).message;
@@ -3665,6 +3939,8 @@ export async function runScan(
                   title: line.substring(0, 200),
                   description: line,
                   recommendation: "Review and remediate the identified vulnerability.",
+                  affectedUrl: targetUrl,
+                  affectedComponent: "Vulnerability Template (Nuclei)",
                 });
               }
               await log(scanId, "info", `Nuclei found ${toolFindings.length} findings`, "nuclei");
@@ -3678,6 +3954,8 @@ export async function runScan(
                 title: "Nuclei scanner not available",
                 description: "Nuclei is not installed on the scan server.",
                 recommendation: "Install Nuclei: download from https://github.com/projectdiscovery/nuclei/releases and place nuclei in /usr/local/bin.",
+                affectedUrl: targetUrl,
+                affectedComponent: "Tool Availability",
               });
             } else {
               await log(scanId, "warn", "Nuclei scan failed (timeout or error).", "nuclei");
@@ -3728,6 +4006,8 @@ export async function runScan(
                     title: (v.name ?? v.title ?? name) as string,
                     description: (v.desc ?? v.name ?? name) as string,
                     recommendation: "Review and remediate the reported issue.",
+                    affectedUrl: targetUrl,
+                    affectedComponent: "Application Scanner (Wapiti)",
                   });
                 }
               }
@@ -3780,6 +4060,8 @@ export async function runScan(
                     evidence: `Affected: ${instances.length} instance(s)${firstUri ? ` — e.g. ${firstUri}` : ""}`,
                     recommendation: solution.substring(0, 1000),
                     cweId,
+                    affectedUrl: firstUri || targetUrl,
+                    affectedComponent: "DAST Scanner (OWASP ZAP)",
                   });
                   zapAlertCount++;
                 }
@@ -3796,6 +4078,8 @@ export async function runScan(
                 description: "OWASP ZAP quick scan completed with no alerts. This indicates good baseline security posture or that the target surface was limited.",
                 evidence: consoleOutput.substring(0, 500),
                 recommendation: "Consider running a full ZAP active scan with authentication for deeper coverage.",
+                affectedUrl: targetUrl,
+                affectedComponent: "DAST Scanner (OWASP ZAP)",
               });
             } else {
               await log(scanId, "info", `ZAP produced ${zapAlertCount} alert(s) parsed into individual findings`, "zap");
@@ -3811,6 +4095,8 @@ export async function runScan(
               title: "OWASP ZAP not available",
               description: "OWASP ZAP is not installed or the scan failed. This limits DAST coverage. Install ZAP to enable session-aware crawling and authenticated scanning.",
               recommendation: "Install OWASP ZAP from https://www.zaproxy.org/download/ — ZAP provides session-aware crawling and authenticated scanning that other tools (Nikto, Nuclei) cannot replicate.",
+              affectedUrl: targetUrl,
+              affectedComponent: "Tool Availability",
             });
           }
           break;
@@ -3883,6 +4169,11 @@ export async function runScan(
           attackTechniques: enriched.attackTechniques,
           iso27001Controls: enriched.iso27001Controls,
           poc,
+          affectedUrl: f.affectedUrl ?? null,
+          affectedComponent: f.affectedComponent ?? null,
+          sourceFile: f.sourceFile ?? null,
+          sourceLine: f.sourceLine ?? null,
+          sourceSnippet: f.sourceSnippet ?? null,
           authContext: f.authContext ?? null,
           status: "open",
         };

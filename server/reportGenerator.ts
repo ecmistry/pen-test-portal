@@ -338,11 +338,11 @@ export function generateMarkdownReport(data: ReportData): string {
     lines.push(`✅ **No vulnerabilities detected.** The target passed all security checks for the selected test categories.`);
   } else {
     if (isAuthenticated) {
-      lines.push(`| # | Title | Severity | CVSS | Priority | Category | Auth Context | Status |`);
-      lines.push(`|---|-------|----------|------|----------|----------|-------------|--------|`);
+      lines.push(`| # | Title | Severity | CVSS | Priority | Category | Affected Component | Auth Context | Status |`);
+      lines.push(`|---|-------|----------|------|----------|----------|--------------------|-------------|--------|`);
     } else {
-      lines.push(`| # | Title | Severity | CVSS | Priority | Category | Status |`);
-      lines.push(`|---|-------|----------|------|----------|----------|--------|`);
+      lines.push(`| # | Title | Severity | CVSS | Priority | Category | Affected Component | Status |`);
+      lines.push(`|---|-------|----------|------|----------|----------|--------------------|--------|`);
     }
     let idx = 1;
     for (const [sev] of [["critical"], ["high"], ["medium"], ["low"], ["info"]] as const) {
@@ -350,11 +350,12 @@ export function generateMarkdownReport(data: ReportData): string {
         const title = f.title.length > 55 ? f.title.substring(0, 52) + "..." : f.title;
         const cvss = f.cvssScore ? String(Number(f.cvssScore).toFixed(1)) : "—";
         const priority = (f as any).remediationPriority ?? "—";
+        const component = (f as any).affectedComponent ?? "—";
         const authCtx = (f as any).authContext === "post-auth" ? "🔐 Post-auth" : (f as any).authContext === "pre-auth" ? "🌐 Pre-auth" : "—";
         if (isAuthenticated) {
-          lines.push(`| ${idx++} | ${title} | ${severityBadge(f.severity)} | ${cvss} | ${priority} | ${f.category} | ${authCtx} | ${(f.status ?? "open").toUpperCase()} |`);
+          lines.push(`| ${idx++} | ${title} | ${severityBadge(f.severity)} | ${cvss} | ${priority} | ${f.category} | ${component} | ${authCtx} | ${(f.status ?? "open").toUpperCase()} |`);
         } else {
-          lines.push(`| ${idx++} | ${title} | ${severityBadge(f.severity)} | ${cvss} | ${priority} | ${f.category} | ${(f.status ?? "open").toUpperCase()} |`);
+          lines.push(`| ${idx++} | ${title} | ${severityBadge(f.severity)} | ${cvss} | ${priority} | ${f.category} | ${component} | ${(f.status ?? "open").toUpperCase()} |`);
         }
       }
     }
@@ -386,6 +387,8 @@ export function generateMarkdownReport(data: ReportData): string {
         lines.push(`|-------|-------|`);
         lines.push(`| Category | ${f.category} |`);
         lines.push(`| Severity | ${severityBadge(f.severity)} |`);
+        if ((f as any).affectedUrl) lines.push(`| Affected URL | \`${(f as any).affectedUrl}\` |`);
+        if ((f as any).affectedComponent) lines.push(`| Affected Component | ${(f as any).affectedComponent} |`);
         // Auth-scanning context from evidence
         const authContextMatch = f.evidence?.match(/^\[Auth Context\] (.+?)$/m);
         if (authContextMatch) {
@@ -443,6 +446,17 @@ export function generateMarkdownReport(data: ReportData): string {
           lines.push(f.evidence.length > 3000 ? f.evidence.substring(0, 3000) + "\n[... truncated for length ...]" : f.evidence);
           lines.push(`\`\`\``);
           lines.push(``);
+        }
+        if ((f as any).sourceFile) {
+          lines.push(`**Source Location:** \`${(f as any).sourceFile}\`${(f as any).sourceLine ? ` (line ${(f as any).sourceLine})` : ""}`);
+          lines.push(``);
+          if ((f as any).sourceSnippet) {
+            lines.push(`**Source Code:**`);
+            lines.push(`\`\`\``);
+            lines.push((f as any).sourceSnippet.substring(0, 2000));
+            lines.push(`\`\`\``);
+            lines.push(``);
+          }
         }
         if (f.recommendation) {
           lines.push(`**Recommendation:** ${f.recommendation}`);
@@ -856,6 +870,11 @@ export function generateJSONReport(data: ReportData): object {
       recommendation: f.recommendation,
       cweId: f.cweId,
       owaspCategory: f.owaspCategory,
+      affectedUrl: (f as any).affectedUrl ?? null,
+      affectedComponent: (f as any).affectedComponent ?? null,
+      sourceFile: (f as any).sourceFile ?? null,
+      sourceLine: (f as any).sourceLine ?? null,
+      sourceSnippet: (f as any).sourceSnippet ?? null,
       cvss: f.cvssScore ? {
         version: "3.1",
         vectorString: f.cvssVector,

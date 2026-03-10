@@ -38,6 +38,7 @@ const mockTarget: Target = {
   userId: 1,
   name: "Test Site",
   url: "https://example.com",
+  repoUrl: null,
   description: null,
   tags: null,
   scanFrequency: "manual",
@@ -67,6 +68,11 @@ const mockFindings: ScanFinding[] = [
     attackTechniques: [{ techniqueId: "T1190", techniqueName: "Exploit Public-Facing Application", tactic: "Initial Access" }],
     iso27001Controls: ["A.14.1.2"],
     poc: null,
+    affectedUrl: "https://example.com",
+    affectedComponent: "HTTP Response Headers",
+    sourceFile: null,
+    sourceLine: null,
+    sourceSnippet: null,
     authContext: null,
     status: "open",
     createdAt: new Date(),
@@ -90,6 +96,11 @@ const mockFindings: ScanFinding[] = [
     attackTechniques: [{ techniqueId: "T1110", techniqueName: "Brute Force", tactic: "Credential Access" }],
     iso27001Controls: ["A.9.4.2", "A.9.4.3"],
     poc: null,
+    affectedUrl: "https://example.com/api/auth/login",
+    affectedComponent: "Login / Authentication Endpoint",
+    sourceFile: null,
+    sourceLine: null,
+    sourceSnippet: null,
     authContext: null,
     status: "open",
     createdAt: new Date(),
@@ -121,6 +132,20 @@ describe("reportGenerator", () => {
       const md = generateMarkdownReport(reportData);
       expect(md).toContain("Total Findings");
       expect(md).toContain("2");
+    });
+
+    it("includes Affected Component column in findings summary table", () => {
+      const md = generateMarkdownReport(reportData);
+      expect(md).toContain("Affected Component");
+      expect(md).toContain("HTTP Response Headers");
+      expect(md).toContain("Login / Authentication Endpoint");
+    });
+
+    it("includes Affected URL and Component in detailed findings", () => {
+      const md = generateMarkdownReport(reportData);
+      expect(md).toContain("Affected URL");
+      expect(md).toContain("`https://example.com`");
+      expect(md).toContain("`https://example.com/api/auth/login`");
     });
   });
 
@@ -751,7 +776,7 @@ describe("reportGenerator", () => {
         cvssVector: null, cvssScore: null, remediationComplexity: null,
         remediationPriority: null, businessImpact: null,
         attackTechniques: null, iso27001Controls: null,
-        poc: null, status: "info", createdAt: new Date(),
+        poc: null, affectedUrl: null, affectedComponent: null, sourceFile: null, sourceLine: null, sourceSnippet: null, status: "info", createdAt: new Date(),
       };
       const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: [finding], generatedAt: new Date() }) as any;
       expect(json.findings[0].apiSecurityCategory).toBeNull();
@@ -790,7 +815,7 @@ describe("reportGenerator", () => {
         cvssVector: "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N", cvssScore: "8.1",
         remediationComplexity: "High", remediationPriority: "P1",
         businessImpact: null, attackTechniques: null, iso27001Controls: null,
-        poc: null, status: "open", createdAt: new Date(),
+        poc: null, affectedUrl: null, affectedComponent: null, sourceFile: null, sourceLine: null, sourceSnippet: null, status: "open", createdAt: new Date(),
       };
       const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: [authFinding], generatedAt: new Date() }) as any;
       expect(json.findings[0].apiSecurityCategory).toEqual({ id: "API1:2023", name: "Broken Object Level Authorization" });
@@ -810,7 +835,7 @@ describe("reportGenerator", () => {
         owaspCategory: "A01:2021", cvssVector: null, cvssScore: null,
         remediationComplexity: null, remediationPriority: null,
         businessImpact: null, attackTechniques: null, iso27001Controls: null,
-        poc: null, status: "open", createdAt: new Date(),
+        poc: null, affectedUrl: null, affectedComponent: null, sourceFile: null, sourceLine: null, sourceSnippet: null, status: "open", createdAt: new Date(),
       };
       const md = generateMarkdownReport({ scan: mockScan, target: mockTarget, findings: [authFinding], generatedAt: new Date() });
       expect(md).toContain("Discovered As");
@@ -889,6 +914,14 @@ describe("reportGenerator", () => {
       const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: mockFindings, generatedAt: new Date() }) as any;
       const f = json.findings[0];
       expect(f).toHaveProperty("apiSecurityCategory");
+    });
+
+    it("includes affectedUrl and affectedComponent in JSON findings", () => {
+      const json = generateJSONReport({ scan: mockScan, target: mockTarget, findings: mockFindings, generatedAt: new Date() }) as any;
+      expect(json.findings[0].affectedUrl).toBe("https://example.com");
+      expect(json.findings[0].affectedComponent).toBe("HTTP Response Headers");
+      expect(json.findings[1].affectedUrl).toBe("https://example.com/api/auth/login");
+      expect(json.findings[1].affectedComponent).toBe("Login / Authentication Endpoint");
     });
 
     it("calculates security grade correctly in JSON", () => {

@@ -40,6 +40,12 @@ async function applyLightMigrations(db: ReturnType<typeof drizzle>) {
   await safeAlter("ALTER TABLE scans ADD COLUMN authMode VARCHAR(20) DEFAULT NULL");
   await safeAlter("ALTER TABLE scans ADD COLUMN authMeta JSON DEFAULT NULL");
   await safeAlter("ALTER TABLE scan_findings ADD COLUMN authContext VARCHAR(20) DEFAULT NULL");
+  await safeAlter("ALTER TABLE scan_findings ADD COLUMN affectedUrl TEXT DEFAULT NULL");
+  await safeAlter("ALTER TABLE scan_findings ADD COLUMN affectedComponent VARCHAR(200) DEFAULT NULL");
+  await safeAlter("ALTER TABLE scan_findings ADD COLUMN sourceFile VARCHAR(500) DEFAULT NULL");
+  await safeAlter("ALTER TABLE scan_findings ADD COLUMN sourceLine INT DEFAULT NULL");
+  await safeAlter("ALTER TABLE scan_findings ADD COLUMN sourceSnippet TEXT DEFAULT NULL");
+  await safeAlter("ALTER TABLE targets ADD COLUMN repoUrl VARCHAR(2048) DEFAULT NULL");
   await safeAlter("ALTER TABLE reports MODIFY markdownContent MEDIUMTEXT");
   await safeAlter("ALTER TABLE reports MODIFY executiveSummary MEDIUMTEXT");
   await safeAlter("ALTER TABLE reports MODIFY complianceNotes MEDIUMTEXT");

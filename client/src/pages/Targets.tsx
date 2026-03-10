@@ -22,6 +22,7 @@ function StatusDot({ isActive }: { isActive: boolean }) {
 interface TargetFormData {
   name: string;
   url: string;
+  repoUrl: string;
   description: string;
   tags: string;
   scanFrequency: "manual" | "daily" | "weekly" | "monthly";
@@ -30,6 +31,7 @@ interface TargetFormData {
 const defaultForm: TargetFormData = {
   name: "",
   url: "",
+  repoUrl: "",
   description: "",
   tags: "",
   scanFrequency: "manual",
@@ -105,6 +107,7 @@ export default function Targets() {
     setForm({
       name: t.name,
       url: t.url,
+      repoUrl: t.repoUrl || "",
       description: t.description || "",
       tags: t.tags || "",
       scanFrequency: t.scanFrequency,
@@ -125,10 +128,11 @@ export default function Targets() {
       toast.error("Name and URL are required");
       return;
     }
+    const payload = { ...form, repoUrl: form.repoUrl || undefined };
     if (editTarget) {
-      updateMutation.mutate({ id: editTarget.id, ...form });
+      updateMutation.mutate({ id: editTarget.id, ...payload });
     } else {
-      createMutation.mutate(form);
+      createMutation.mutate(payload);
     }
   }
 
@@ -341,6 +345,16 @@ export default function Targets() {
                 onChange={(e) => setForm({ ...form, url: e.target.value })}
                 className="bg-input border-border text-foreground placeholder:text-muted-foreground"
               />
+            </div>
+            <div>
+              <Label className="text-foreground text-sm mb-1.5 block">Repository URL <span className="text-muted-foreground font-normal">(for SAST)</span></Label>
+              <Input
+                placeholder="https://github.com/org/repo.git"
+                value={form.repoUrl}
+                onChange={(e) => setForm({ ...form, repoUrl: e.target.value })}
+                className="bg-input border-border text-foreground placeholder:text-muted-foreground"
+              />
+              <p className="text-xs text-muted-foreground mt-1">Git repository URL to enable source code analysis (Semgrep). Leave blank to skip SAST.</p>
             </div>
             <div>
               <Label className="text-foreground text-sm mb-1.5 block">Description</Label>
