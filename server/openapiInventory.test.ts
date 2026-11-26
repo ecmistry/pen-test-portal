@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { parseOpenApiDocument, extractSchemaPropertyNames } from "./openapiInventory";
 import { dedupeFindings, profilePrivilegeRank } from "./scanEngine";
-import { mergeProbePaths, normalizeFindingKey, confidenceScoreMultiplier, cweUrlKey, toolsForRetest, injectPathSegment, inventoryUrlsForDast, nucleiConfidenceFromRow } from "./scanQuality";
+import { mergeProbePaths, normalizeFindingKey, normalizeAffectedUrl, confidenceScoreMultiplier, cweUrlKey, toolsForRetest, injectPathSegment, inventoryUrlsForDast, nucleiConfidenceFromRow, scannerFamily, scaConfidenceFromVuln, wapitiConfidenceFromFinding, probeTargetsFromFinding, graphqlInjectionTargetsFromIntrospection } from "./scanQuality";
 import { findingFingerprint } from "./findingFingerprint";
 
 describe("parseOpenApiDocument", () => {
@@ -133,5 +133,40 @@ describe("scanQuality extras", () => {
     expect(toolsForRetest({ category: "Authorization", title: "BOLA" })).toContain("auth-roles");
     expect(nucleiConfidenceFromRow({ info: { severity: "info" }, "matcher-status": false })).toBe("heuristic");
     expect(nucleiConfidenceFromRow({ info: { severity: "high" }, "matcher-status": true, "curl-command": "curl x", type: "http" })).toBe("confirmed");
+  });
+});
+
+describe("wave3 quality helpers", () => {
+  it("keeps query param names in normalizeAffectedUrl", () => {
+    const a = normalizeAffectedUrl("https://t/api?q=1&filter=x");
+    const b = normalizeAffectedUrl("https://t/api?filter=y&q=2");
+    expect(a).toBe(b);
+    expect(a).toContain("filter=");
+    expect(a).toContain("q=");
+    expect(normalizeAffectedUrl("https://t/api?q=1")).not.toBe(normalizeAffectedUrl("https://t/api?id=1"));
+  });
+
+  it("corroboration families and SCA/Wapiti confidence", () => {
+    expect(scannerFamily("OWASP ZAP")).toBe("zap");
+    expect(scaConfidenceFromVuln({ severity: "critical", fixedVersion: "2.0", epss: 0.7 })).toBe("confirmed");
+    expect(scaConfidenceFromVuln({ severity: "low", fixedVersion: null })).toBe("heuristic");
+    expect(wapitiConfidenceFromFinding({ severity: "info", name: "HTTP Headers" })).toBe("heuristic");
+  });
+
+  it("probeTargetsFromFinding and graphql introspection targets", () => {
+    const probes = probeTargetsFromFinding({ affectedUrl: "https://t/search?q=test", category: "XSS" });
+    expect(probes[0].path).toContain("/search");
+    expect(probes[0].params).toContain("q");
+    const targets = graphqlInjectionTargetsFromIntrospection('"name":"user","args":[{"name":"id","type":{}}]');
+    expect(targets.some((t) => t.field === "user" && t.arg === "id")).toBe(true);
+  });
+
+  it("multi-tool dedupe upgrades confidence", () => {
+    const out = dedupeFindings([
+      { title: "A", category: "Nuclei", severity: "high" as const, cweId: "CWE-79", affectedUrl: "https://t/x", confidence: "likely" as const },
+      { title: "B", category: "XSS", severity: "high" as const, cweId: "CWE-79", affectedUrl: "https://t/x", confidence: "likely" as const, evidence: "reflected" },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].confidence).toBe("confirmed");
   });
 });

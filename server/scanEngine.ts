@@ -56,11 +56,16 @@ import {
   mergeEvidence,
   mergeProbePaths,
   graphqlPathsFromInventory,
+  graphqlInjectionTargetsFromIntrospection,
   confidenceScoreMultiplier,
   nucleiConfidenceFromRow,
+  wapitiConfidenceFromFinding,
+  scaConfidenceFromVuln,
   inventoryUrlsForDast,
   injectPathSegment,
   toolsForRetest,
+  probeTargetsFromFinding,
+  scannerFamily,
 } from "./scanQuality";
 import { findingFingerprint, isWaivedFinding } from "./findingFingerprint";
 
@@ -256,10 +261,15 @@ export function profilePrivilegeRank(profile: AuthProfile): number {
 
 /** Cross-tool dedupe using normalized URL + CWE/template/title correlation. */
 export function dedupeFindings<T extends Finding>(findings: T[]): T[] {
+  const familiesByKey = new Map<string, Set<string>>();
   const mergeInto = (byKey: Map<string, T>, key: string, f: T) => {
     const existing = byKey.get(key);
+    const fam = scannerFamily(f.category);
+    const fams = familiesByKey.get(key) ?? new Set<string>();
+    fams.add(fam);
+    familiesByKey.set(key, fams);
     if (!existing) {
-      byKey.set(key, f);
+      byKey.set(key, { ...f });
       return;
     }
     const preferred = preferFinding(existing, f) as T;
@@ -269,6 +279,11 @@ export function dedupeFindings<T extends Finding>(findings: T[]): T[] {
     if (!preferred.confidence || CONFIDENCE_FALLBACK(f) > CONFIDENCE_FALLBACK(preferred)) {
       preferred.confidence = f.confidence ?? preferred.confidence;
     }
+    // Multi-tool corroboration → confirmed
+    if (fams.size >= 2 && preferred.confidence !== "confirmed") {
+      preferred.confidence = "confirmed";
+      preferred.evidence = mergeEvidence(preferred.evidence, `Corroborated by ${fams.size} scanners: ${Array.from(fams).join(", ")}`);
+    }
     byKey.set(key, preferred);
   };
 
@@ -277,6 +292,7 @@ export function dedupeFindings<T extends Finding>(findings: T[]): T[] {
 
   // Secondary pass: merge cross-tool duplicates that share CWE + normalized URL
   const byCwe = new Map<string, T>();
+  familiesByKey.clear();
   for (const f of Array.from(byKey.values())) {
     const ck = cweUrlKey(f);
     if (!ck) {
@@ -1016,6 +1032,46 @@ async function testSQLInjection(scanId: number, targetUrl: string, scanMode: Sca
     }
   }
 
+
+  // Blind SQLi OOB (MySQL UNC / DNS) via Interactsh — confirms sinks without error leakage
+  try {
+    const { createInteractshSession } = await import("./interactsh");
+    const oob = await createInteractshSession();
+    if (oob) {
+      const paths = mergeProbePaths(scanMode === "full" ? ["/?id=", "/api/users?id="] : ["/?id="], extraPaths, 6);
+      for (const path of paths.slice(0, 4)) {
+        const probeId = `gs${scanId}sql${Date.now().toString(36).slice(-4)}`;
+        const host = oob.makeCallbackUrl(probeId).replace(/^https?:\/\//, "");
+        const payload = `' OR (SELECT LOAD_FILE(CONCAT('\\\\\\\\', '${probeId}', '.${host.split(".").slice(-2).join(".")}\\\\a')))-- `;
+        // Prefer simpler DNS callback payload that works with some ORMs logging connections
+        const payload2 = `1 AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT MID(VERSION(),1,1)),0x7e))`; // keep error-based aside
+        void payload2;
+        try {
+          await httpGet(targetUrl, path.includes("?") ? `${path}${encodeURIComponent(payload)}` : `${path}?id=${encodeURIComponent(payload)}`, { cookies, timeout: 10000 });
+          await new Promise((r) => setTimeout(r, 2500));
+          if (await oob.poll(probeId)) {
+            findings.push({
+              category: "SQL Injection",
+              severity: "critical",
+              confidence: "confirmed",
+              title: `Blind SQL injection (OOB) via ${path.split("?")[0] || path}`,
+              description: "Out-of-band callback confirmed a SQL injection sink that does not return SQL errors in-band.",
+              evidence: `Path: ${path}\nOOB probe: ${probeId}\nhost: ${oob.host}`,
+              recommendation: "Use parameterized queries for all user-controlled inputs.",
+              cweId: "CWE-89",
+              owaspCategory: "A03:2021 – Injection",
+              affectedUrl: `${targetUrl.replace(/\/$/, "")}${path.split("?")[0]}`,
+              affectedComponent: "SQL sink",
+              templateId: `oob-sqli:${path.split("?")[0]}`,
+            });
+            break;
+          }
+        } catch { /* ignore */ }
+      }
+      await oob.close?.();
+    }
+  } catch { /* OOB optional */ }
+
   if (findings.length === 0) {
     await log(scanId, "success", "No SQL injection vulnerabilities detected in tested endpoints", "sqli");
   }
@@ -1156,6 +1212,43 @@ async function testXSS(scanId: number, targetUrl: string, scanMode: ScanMode, co
       } catch { /* ignore */ }
     }
   }
+
+
+  // Blind XSS via Interactsh (img/script src callback) — confirms sinks that don't reflect
+  try {
+    const { createInteractshSession } = await import("./interactsh");
+    const oob = await createInteractshSession();
+    if (oob) {
+      const paths = mergeProbePaths(scanMode === "full" ? ["/search?q=", "/?q=", "/comment?text="] : ["/search?q=", "/?q="], extraPaths, 8);
+      for (const path of paths.slice(0, 5)) {
+        const probeId = `gs${scanId}xss${Date.now().toString(36).slice(-4)}`;
+        const cb = oob.makeCallbackUrl(probeId);
+        const payload = `"><img src="${cb}">`;
+        try {
+          await httpGet(targetUrl, `${path}${encodeURIComponent(payload)}`, { cookies, timeout: 8000 });
+          await new Promise((r) => setTimeout(r, 2000));
+          if (await oob.poll(probeId)) {
+            findings.push({
+              category: "XSS",
+              severity: "high",
+              confidence: "confirmed",
+              title: `Blind XSS (OOB) via ${path.split("?")[0] || path}`,
+              description: "Out-of-band callback confirmed the application fetched an attacker-controlled URL from an XSS payload (blind/stored-style sink).",
+              evidence: `Path: ${path}\nOOB probe: ${probeId}\nhost: ${oob.host}`,
+              recommendation: "Encode untrusted input for HTML context; use CSP to block unexpected script/image loads.",
+              cweId: "CWE-79",
+              owaspCategory: "A03:2021 – Injection",
+              affectedUrl: `${targetUrl.replace(/\/$/, "")}${path.split("?")[0]}`,
+              affectedComponent: "XSS sink",
+              templateId: `oob-xss:${path.split("?")[0]}`,
+            });
+            break;
+          }
+        } catch { /* ignore */ }
+      }
+      await oob.close?.();
+    }
+  } catch { /* OOB optional */ }
 
   if (findings.length === 0) {
     await log(scanId, "success", "No reflected XSS vulnerabilities detected in tested endpoints", "xss");
@@ -2029,44 +2122,63 @@ async function testGraphQL(scanId: number, targetUrl: string, cookies?: string, 
     }
   } catch { /* continue */ }
 
-  // SQL injection via GraphQL arguments
+  // Schema-driven GraphQL injection (from introspection when available)
+  let gqlTargets = [{ field: "user", arg: "id" }, { field: "users", arg: "id" }, { field: "search", arg: "q" }];
+  try {
+    const intro = await httpGet(targetUrl, detectedPath, {
+      method: "POST",
+      body: '{"query":"{ __schema { queryType { fields { name args { name } } } } }"}',
+      headers: { "Content-Type": "application/json" },
+      timeout: 10000,
+      cookies,
+    });
+    if (intro.body.includes("queryType") || intro.body.includes("fields")) {
+      gqlTargets = graphqlInjectionTargetsFromIntrospection(intro.body);
+      await log(scanId, "info", `GraphQL schema injection targets: ${gqlTargets.slice(0, 5).map((t) => `${t.field}(${t.arg})`).join(", ")}`, "graphql");
+    }
+  } catch { /* use defaults */ }
+
   const sqliPayloads = ["' OR '1'='1", "1; DROP TABLE users--", "' UNION SELECT null--"];
-  for (const payload of sqliPayloads) {
-    try {
-      const query = JSON.stringify({ query: `{ user(id: "${payload}") { id } }` });
-      const resp = await httpGet(targetUrl, detectedPath, {
-        method: "POST",
-        body: query,
-        headers: { "Content-Type": "application/json" },
-        timeout: 5000,
-        cookies,
-      });
-      const sqlErrors = [/sql syntax/i, /mysql/i, /postgresql/i, /sqlite/i, /ORA-\d/i, /SQLSTATE/i, /unclosed quotation/i];
-      if (sqlErrors.some((p) => p.test(resp.body))) {
-        findings.push({
-          category: "GraphQL",
-          severity: "critical",
-          title: `SQL injection via GraphQL at ${detectedPath}`,
-          description: "SQL error patterns detected in GraphQL response when injection payloads are sent as arguments.",
-          evidence: `Payload: ${payload}\nResponse: ${resp.body.substring(0, 300)}`,
-          recommendation: "Use parameterised queries in GraphQL resolvers. Never interpolate user input into SQL strings.",
-          cweId: "CWE-89",
-          owaspCategory: "A03:2021 – Injection",
-          poc: {
-            curlCommand: buildCurlCommand(targetUrl, detectedPath, { method: "POST", body: query, headers: { "Content-Type": "application/json" } }),
-            requestRaw: buildRawRequest(targetUrl, detectedPath, { method: "POST", body: query, headers: { "Content-Type": "application/json" } }),
-            responseSnippet: resp.body.substring(0, 500),
-            reproductionSteps: [
-              `1. Send POST to ${targetUrl}${detectedPath} with body: ${query}`,
-              "2. Observe SQL error in the response",
-            ],
-          },
-          affectedUrl: `${targetUrl}${detectedPath}`,
-          affectedComponent: "GraphQL API",
+  outerGql: for (const target of gqlTargets.slice(0, 6)) {
+    for (const payload of sqliPayloads) {
+      try {
+        const query = JSON.stringify({ query: `{ ${target.field}(${target.arg}: "${payload}") { __typename } }` });
+        const resp = await httpGet(targetUrl, detectedPath, {
+          method: "POST",
+          body: query,
+          headers: { "Content-Type": "application/json" },
+          timeout: 5000,
+          cookies,
         });
-        break;
-      }
-    } catch { /* continue */ }
+        const sqlErrors = [/sql syntax/i, /mysql/i, /postgresql/i, /sqlite/i, /ORA-\d/i, /SQLSTATE/i, /unclosed quotation/i];
+        if (sqlErrors.some((p) => p.test(resp.body))) {
+          findings.push({
+            category: "GraphQL",
+            severity: "critical",
+            confidence: "confirmed",
+            title: `SQL injection via GraphQL ${target.field}(${target.arg})`,
+            description: `SQL error patterns detected when injecting into GraphQL field '${target.field}' argument '${target.arg}'.`,
+            evidence: `Payload: ${payload}\nQuery: ${query}\nResponse: ${resp.body.substring(0, 300)}`,
+            recommendation: "Use parameterised queries in GraphQL resolvers. Never interpolate user input into SQL strings.",
+            cweId: "CWE-89",
+            owaspCategory: "A03:2021 – Injection",
+            templateId: `graphql-sqli:${target.field}:${target.arg}`,
+            poc: {
+              curlCommand: buildCurlCommand(targetUrl, detectedPath, { method: "POST", body: query, headers: { "Content-Type": "application/json" } }),
+              requestRaw: buildRawRequest(targetUrl, detectedPath, { method: "POST", body: query, headers: { "Content-Type": "application/json" } }),
+              responseSnippet: resp.body.substring(0, 500),
+              reproductionSteps: [
+                `1. Send POST to ${targetUrl}${detectedPath} with body: ${query}`,
+                "2. Observe SQL error in the response",
+              ],
+            },
+            affectedUrl: `${targetUrl}${detectedPath}`,
+            affectedComponent: "GraphQL API",
+          });
+          break outerGql;
+        }
+      } catch { /* continue */ }
+    }
   }
 
   // Deeply nested query (resource exhaustion) — require data success, not mere absence of words
@@ -2541,6 +2653,8 @@ export interface ScaDependencyVuln {
   cve: string;
   severity: "critical" | "high" | "medium" | "low";
   summary: string;
+  /** Optional exploit prediction score 0..1 when available */
+  epss?: number | null;
 }
 
 /** Parse OSV-Scanner JSON output into structured vulnerability findings */
@@ -2560,6 +2674,8 @@ export function parseOsvOutput(jsonStr: string): ScaDependencyVuln[] {
             (vuln.severity?.[0]?.score >= 9.0 ? "critical" : vuln.severity?.[0]?.score >= 7.0 ? "high" :
               vuln.severity?.[0]?.score >= 4.0 ? "medium" : "low");
           const fixed = vuln.affected?.[0]?.ranges?.[0]?.events?.find((e: any) => e.fixed)?.fixed ?? null;
+          const epssRaw = vuln.database_specific?.epss ?? vuln.ecosystem_specific?.epss ?? vuln.epss;
+          const epss = typeof epssRaw === "number" ? epssRaw : typeof epssRaw === "string" ? Number(epssRaw) : null;
           vulns.push({
             package: pkgName,
             installedVersion: pkgVersion,
@@ -2567,6 +2683,7 @@ export function parseOsvOutput(jsonStr: string): ScaDependencyVuln[] {
             cve: id,
             severity: severity as ScaDependencyVuln["severity"],
             summary: vuln.summary ?? vuln.details?.substring(0, 200) ?? `Vulnerability ${id}`,
+            epss: Number.isFinite(epss as number) ? (epss as number) : null,
           });
         }
       }
@@ -2604,18 +2721,24 @@ export function parseTrivyOutput(jsonStr: string): ScaDependencyVuln[] {
 
 /** Convert SCA vulnerabilities into scan findings */
 export function scaVulnsToFindings(vulns: ScaDependencyVuln[], ecosystem: string): Finding[] {
-  return vulns.map((v) => ({
-    category: "SCA",
-    severity: v.severity,
-    title: `Vulnerable Dependency: ${v.package} ${v.installedVersion} (${v.cve})`,
-    description: `${v.summary}. Ecosystem: ${ecosystem}.${v.fixedVersion ? ` Upgrade to ${v.fixedVersion} or later.` : " No fixed version available."}`,
-    evidence: `Package: ${v.package}\nInstalled: ${v.installedVersion}\nFixed: ${v.fixedVersion ?? "N/A"}\nCVE: ${v.cve}`,
-    recommendation: v.fixedVersion
-      ? `Upgrade ${v.package} to version ${v.fixedVersion} or later.`
-      : `Review ${v.package} ${v.installedVersion} for alternative packages or mitigations.`,
-    cweId: "CWE-1104",
-    owaspCategory: "A06:2021 – Vulnerable and Outdated Components",
-  }));
+  return vulns.map((v) => {
+    const epss = (v as ScaDependencyVuln & { epss?: number | null }).epss ?? null;
+    const confidence = scaConfidenceFromVuln({ severity: v.severity, fixedVersion: v.fixedVersion, epss });
+    return {
+      category: "SCA",
+      severity: v.severity,
+      confidence,
+      templateId: v.cve,
+      title: `Vulnerable Dependency: ${v.package} ${v.installedVersion} (${v.cve})`,
+      description: `${v.summary}. Ecosystem: ${ecosystem}.${v.fixedVersion ? ` Upgrade to ${v.fixedVersion} or later.` : " No fixed version available."}${epss != null ? ` EPSS=${epss}` : ""}`,
+      evidence: `Package: ${v.package}\nInstalled: ${v.installedVersion}\nFixed: ${v.fixedVersion ?? "N/A"}\nCVE: ${v.cve}${epss != null ? `\nEPSS: ${epss}` : ""}`,
+      recommendation: v.fixedVersion
+        ? `Upgrade ${v.package} to version ${v.fixedVersion} or later.`
+        : `Review ${v.package} ${v.installedVersion} for alternative packages or mitigations.`,
+      cweId: "CWE-1104",
+      owaspCategory: "A06:2021 – Vulnerable and Outdated Components",
+    };
+  });
 }
 
 // ─── PEN-27: AI Prompt Injection & Guardrail Bypass Detection ─────────────
@@ -3598,7 +3721,7 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       const confidence = metadata.confidence ?? "";
       const ruleSource = metadata.source ?? "";
 
-      const confTier = conf === "HIGH" ? "confirmed" as const : "likely" as const;
+      const confTier = conf === "HIGH" ? "likely" as const : conf === "MEDIUM" ? "likely" as const : "heuristic" as const;
       findings.push({
         category: "SAST",
         severity,
@@ -3689,10 +3812,18 @@ export async function testVerticalEscalation(
     : AUTH_ADMIN_ENDPOINTS;
 
   for (const endpoint of endpointsToTest) {
+    const methods: Array<"GET" | "POST"> = /create|update|delete|reset|admin|config/i.test(endpoint) ? ["GET", "POST"] : ["GET"];
+    for (const method of methods) {
     for (const admin of highPriv) {
       let adminStatus: number;
       try {
-        const resp = await httpGet(targetUrl, endpoint, { headers: buildAuthHeader(admin), timeout: 5000, cookies });
+        const resp = await httpGet(targetUrl, endpoint, {
+          method,
+          body: method === "POST" ? "{}" : undefined,
+          headers: { ...buildAuthHeader(admin), ...(method === "POST" ? { "Content-Type": "application/json" } : {}) },
+          timeout: 5000,
+          cookies,
+        });
         adminStatus = resp.status;
       } catch {
         continue;
@@ -3702,16 +3833,27 @@ export async function testVerticalEscalation(
 
       for (const user of lowPriv) {
         try {
-          const resp = await httpGet(targetUrl, endpoint, { headers: buildAuthHeader(user), timeout: 5000, cookies });
+          const resp = await httpGet(targetUrl, endpoint, {
+            method,
+            body: method === "POST" ? "{}" : undefined,
+            headers: { ...buildAuthHeader(user), ...(method === "POST" ? { "Content-Type": "application/json" } : {}) },
+            timeout: 5000,
+            cookies,
+          });
 
           const looksDenied = /unauthorized|forbidden|access denied|not allowed|\blogin\b/i.test(resp.body.slice(0, 500));
           if (resp.status < 400 && !looksDenied && resp.status === adminStatus) {
-            const unauth = await httpGet(targetUrl, endpoint, { timeout: 5000 }).catch(() => null);
+            const unauth = await httpGet(targetUrl, endpoint, {
+              method,
+              body: method === "POST" ? "{}" : undefined,
+              headers: method === "POST" ? { "Content-Type": "application/json" } : {},
+              timeout: 5000,
+            }).catch(() => null);
             // Publicly identical response → not a privilege-escalation finding
             if (unauth && unauth.status === resp.status && Math.abs(unauth.body.length - resp.body.length) < 40) {
               continue;
             }
-            const title = `Vertical Privilege Escalation — ${endpoint} accessible as ${user.name}`;
+            const title = `Vertical Privilege Escalation — ${method} ${endpoint} accessible as ${user.name}`;
             findings.push({
               category: "Authorization",
               severity: "high",
@@ -3725,10 +3867,10 @@ export async function testVerticalEscalation(
               discoveredAs: user.name,
               exploitableAs: user.name,
               requiredLevel: admin.name,
-              authEndpoint: `GET ${endpoint}`,
+              authEndpoint: `${method} ${endpoint}`,
               poc: {
-                curlCommand: `curl -H "${Object.entries(buildAuthHeader(user)).map(([k, v]) => `${k}: ${v}`).join("; ")}" ${targetUrl}${endpoint}`,
-                requestRaw: `GET ${endpoint} HTTP/1.1\nHost: ${new URL(targetUrl).host}\n${Object.entries(buildAuthHeader(user)).map(([k, v]) => `${k}: ${v}`).join("\n")}`,
+                curlCommand: `curl -X ${method} -H "${Object.entries(buildAuthHeader(user)).map(([k, v]) => `${k}: ${v}`).join("; ")}" ${targetUrl}${endpoint}`,
+                requestRaw: `${method} ${endpoint} HTTP/1.1\nHost: ${new URL(targetUrl).host}\n${Object.entries(buildAuthHeader(user)).map(([k, v]) => `${k}: ${v}`).join("\n")}`,
                 responseSnippet: `HTTP ${resp.status}\n${resp.body.substring(0, 300)}`,
                 reproductionSteps: [
                   `Authenticate as ${user.name} (${user.type} auth)`,
@@ -3744,6 +3886,7 @@ export async function testVerticalEscalation(
         }
       }
     }
+    } // methods
   }
 
   if (findings.length === 0) {
@@ -4007,18 +4150,22 @@ async function testOpenApiBodyInjection(
   for (const probe of postProbes) {
     const params = (probe.params?.length ? probe.params : ["q", "id", "name", "search"]).slice(0, 3);
     const method = (probe.method || "POST").toUpperCase();
+    const useForm = probe.hasJsonBody === false || (probe.contentType || "").includes("form-urlencoded");
+    const contentType = useForm ? "application/x-www-form-urlencoded" : "application/json";
+    const encodeBody = (obj: Record<string, string>) =>
+      useForm ? new URLSearchParams(obj).toString() : JSON.stringify(obj);
 
-    // Baseline empty/minimal JSON
+    // Baseline empty/minimal body
     let baselineBody = "";
     let baselineStatus = 0;
     try {
       const baseObj: Record<string, string> = {};
       for (const p of params) baseObj[p] = "pentest_baseline";
-      const baseRaw = JSON.stringify(baseObj);
+      const baseRaw = encodeBody(baseObj);
       const baseResp = await httpGet(targetUrl, probe.path, {
         method,
         body: baseRaw,
-        headers: { "Content-Type": "application/json", Accept: "application/json,text/html,*/*" },
+        headers: { "Content-Type": contentType, Accept: "application/json,text/html,*/*" },
         timeout: 10000,
         cookies,
       });
@@ -4031,11 +4178,11 @@ async function testOpenApiBodyInjection(
         try {
           const bodyObj: Record<string, string> = {};
           for (const p of params) bodyObj[p] = p === param ? payload : "pentest_ok";
-          const raw = JSON.stringify(bodyObj);
+          const raw = encodeBody(bodyObj);
           const resp = await httpGet(targetUrl, probe.path, {
             method,
             body: raw,
-            headers: { "Content-Type": "application/json", Accept: "application/json,text/html,*/*" },
+            headers: { "Content-Type": contentType, Accept: "application/json,text/html,*/*" },
             timeout: 12000,
             cookies,
           });
@@ -4071,11 +4218,11 @@ async function testOpenApiBodyInjection(
         try {
           const bodyObj: Record<string, string> = {};
           for (const p of params) bodyObj[p] = p === param ? payload : "pentest_ok";
-          const raw = JSON.stringify(bodyObj);
+          const raw = encodeBody(bodyObj);
           const resp = await httpGet(targetUrl, probe.path, {
             method,
             body: raw,
-            headers: { "Content-Type": "application/json", Accept: "text/html,application/json,*/*" },
+            headers: { "Content-Type": contentType, Accept: "text/html,application/json,*/*" },
             timeout: 12000,
             cookies,
           });
@@ -4342,33 +4489,67 @@ export async function runScan(
     }
   }
 
-  // Discovery crawl when OpenAPI was not provided
-  if (!apiInventory) {
-    try {
-      const discovered = await discoverSiteRoutes(scanId, targetUrl, sessionCookies);
-      if (discovered.allPaths.length > 0) {
-        apiInventory = {
-          adminEndpoints: discovered.adminEndpoints,
-          resourcePatterns: discovered.resourcePatterns,
-          coverageNote: `Discovery inventory: ${discovered.allPaths.length} routes (${discovered.adminEndpoints.length} admin-like, ${discovered.resourcePatterns.length} resource patterns)`,
-        };
-        probeTargets = discovered.allPaths.slice(0, 60).map((p) => ({ path: p, method: "GET", source: "discovery" as const }));
-        await log(scanId, "info", apiInventory.coverageNote!, "init");
-        allFindings.push({
-          category: "Discovery",
-          severity: "info",
-          title: "Site discovery crawl completed",
-          description: apiInventory.coverageNote!,
-          evidence: `Sample paths: ${discovered.allPaths.slice(0, 15).join(", ")}`,
-          recommendation: "Provide an OpenAPI URL on the target for more precise API inventory.",
-          affectedUrl: targetUrl,
-          affectedComponent: "Discovery",
-        });
+  // Discovery crawl — always run and merge with OpenAPI inventory when present
+  try {
+    const discovered = await discoverSiteRoutes(scanId, targetUrl, sessionCookies);
+    if (discovered.allPaths.length > 0) {
+      const discProbes = discovered.allPaths.slice(0, 60).map((p) => ({ path: p, method: "GET" as const, source: "discovery" as const }));
+      const seenPaths = new Set(probeTargets.map((p) => `${(p.method || "GET").toUpperCase()} ${p.path}`));
+      for (const p of discProbes) {
+        const key = `GET ${p.path}`;
+        if (seenPaths.has(key)) continue;
+        seenPaths.add(key);
+        probeTargets.push(p);
       }
-    } catch (err) {
-      await log(scanId, "info", `Discovery crawl skipped: ${(err as Error).message}`, "init");
+      const admin = Array.from(new Set([...(apiInventory?.adminEndpoints || []), ...discovered.adminEndpoints])).slice(0, 50);
+      const resources = Array.from(new Set([...(apiInventory?.resourcePatterns || []), ...discovered.resourcePatterns])).slice(0, 40);
+      const coverageNote = apiInventory
+        ? `Hybrid inventory: OpenAPI + discovery (${discovered.allPaths.length} crawled routes; ${probeTargets.length} probe targets)`
+        : `Discovery inventory: ${discovered.allPaths.length} routes (${discovered.adminEndpoints.length} admin-like, ${discovered.resourcePatterns.length} resource patterns)`;
+      apiInventory = {
+        adminEndpoints: admin,
+        resourcePatterns: resources,
+        coverageNote,
+        probeTargets: apiInventory?.probeTargets,
+      };
+      await log(scanId, "info", coverageNote, "init");
+      allFindings.push({
+        category: "Discovery",
+        severity: "info",
+        title: apiInventory.probeTargets ? "Hybrid OpenAPI + discovery crawl" : "Site discovery crawl completed",
+        description: coverageNote,
+        evidence: `Sample paths: ${discovered.allPaths.slice(0, 15).join(", ")}`,
+        recommendation: "Keep OpenAPI updated; discovery fills gaps for HTML/JS-only routes.",
+        affectedUrl: targetUrl,
+        affectedComponent: "Discovery",
+      });
     }
+  } catch (err) {
+    await log(scanId, "info", `Discovery crawl skipped: ${(err as Error).message}`, "init");
   }
+
+  // Focused retest: seed probes / Nuclei -id from parent finding
+  let retestNucleiId: string | undefined;
+  try {
+    const thisScanEarly = await getScanById(scanId);
+    const parentIdEarly = thisScanEarly?.parentFindingId;
+    if (parentIdEarly) {
+      const parent = await getFindingById(parentIdEarly);
+      if (parent) {
+        const focused = probeTargetsFromFinding(parent);
+        if (focused.length) {
+          probeTargets = [...focused, ...probeTargets].slice(0, 80);
+          await log(scanId, "info", `Retest focused on ${focused[0].path} from finding #${parentIdEarly}`, "retest");
+        }
+        if (parent.templateId && /nuclei/i.test(parent.category || "")) {
+          retestNucleiId = parent.templateId;
+        } else if (parent.templateId && !parent.templateId.includes(":") && !parent.templateId.startsWith("path-") && !parent.templateId.startsWith("openapi-")) {
+          // Likely a Nuclei template id
+          if (/^[a-z0-9][a-z0-9._-]{2,}$/i.test(parent.templateId)) retestNucleiId = parent.templateId;
+        }
+      }
+    }
+  } catch { /* ignore */ }
 
   // Full mode: add extra tools (cors, traversal, config) and external tools (nikto, nuclei, zap)
   const toolsToRun = Array.from(new Set(toolList.map((t) => t.toLowerCase().trim())));
@@ -4623,7 +4804,12 @@ export async function runScan(
             } else {
               nucleiArgs.push("-u", targetUrl);
             }
-            if (scanMode === "full") nucleiArgs.push("-tags", "cve,misconfig,exposure,takeover");
+            if (retestNucleiId) {
+              nucleiArgs.push("-id", retestNucleiId);
+              await log(scanId, "info", `Nuclei retest restricted to template id=${retestNucleiId}`, "nuclei");
+            } else if (scanMode === "full") {
+              nucleiArgs.push("-tags", "cve,misconfig,exposure,takeover");
+            }
             if (sessionCookies) nucleiArgs.push("-H", `Cookie: ${sessionCookies}`);
             try {
               const result = await runTool(nucleiCmd, nucleiArgs, {
@@ -4641,7 +4827,7 @@ export async function runScan(
             if (output) {
               const lines = output.split("\n").filter((l) => l.trim());
               let parsedCount = 0;
-              for (const line of lines.slice(0, 80)) {
+              for (const line of lines.slice(0, scanMode === "full" ? 150 : 100)) {
                 try {
                   const row = JSON.parse(line);
                   const info = row.info || {};
@@ -4755,7 +4941,7 @@ export async function runScan(
                   toolFindings.push({
                     category: "Wapiti",
                     severity,
-                    confidence: "likely",
+                    confidence: wapitiConfidenceFromFinding({ severity, name: String(v.name ?? v.title ?? name), module: String(name) }),
                     title: (v.name ?? v.title ?? name) as string,
                     description: (v.desc ?? v.name ?? name) as string,
                     evidence: JSON.stringify({ method, path: pathInfo, info: anyV.info || anyV.http_request || null }).slice(0, 4000),
@@ -4918,6 +5104,41 @@ export async function runScan(
     allFindings.push(...uniqueFindings);
     if (beforeDedupe !== allFindings.length) {
       await log(scanId, "info", `Deduplicated findings: ${beforeDedupe} → ${allFindings.length}`, "init");
+    }
+
+    // SAST ↔ DAST correlation: upgrade when CWE+URL overlaps; downgrade lone SAST "confirmed"
+    {
+      const dastFamilies = new Set(["nuclei", "zap", "wapiti", "sqli", "xss", "ssrf", "graphql", "nikto", "authz"]);
+      const byCwe = new Map<string, Finding[]>();
+      for (const f of allFindings) {
+        const k = cweUrlKey(f);
+        if (!k) continue;
+        const list = byCwe.get(k) ?? [];
+        list.push(f);
+        byCwe.set(k, list);
+      }
+      let upgraded = 0;
+      let downgraded = 0;
+      for (const f of allFindings) {
+        const fam = scannerFamily(f.category);
+        if (fam === "sast") {
+          const k = cweUrlKey(f);
+          const peers = k ? (byCwe.get(k) || []).filter((p) => dastFamilies.has(scannerFamily(p.category))) : [];
+          if (peers.length > 0) {
+            if (f.confidence !== "confirmed") {
+              f.confidence = "confirmed";
+              f.evidence = mergeEvidence(f.evidence, `Corroborated by runtime/DAST: ${peers.map((p) => p.category).join(", ")}`);
+              upgraded++;
+            }
+          } else if (f.confidence === "confirmed") {
+            f.confidence = "likely"; // no runtime proof
+            downgraded++;
+          }
+        }
+      }
+      if (upgraded || downgraded) {
+        await log(scanId, "info", `SAST↔DAST correlation: ${upgraded} upgraded, ${downgraded} downgraded`, "init");
+      }
     }
 
     // Apply org waivers: exclude from score/trend; persist as false_positive

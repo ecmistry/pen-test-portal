@@ -15,6 +15,7 @@ export interface ApiEndpoint {
   injectParams?: string[];
   /** True when operation declares a JSON request body */
   hasJsonBody?: boolean;
+  contentType?: string;
 }
 
 export interface ApiInventory {
@@ -28,6 +29,7 @@ export interface ApiInventory {
     method: string;
     params: string[];
     hasJsonBody?: boolean;
+    contentType?: string;
     source: "openapi";
   }>;
 }
@@ -88,12 +90,12 @@ function bodyInjectParams(root: Record<string, unknown>, requestBody: unknown): 
   const rb = requestBody as Record<string, unknown>;
   const content = rb.content as Record<string, { schema?: unknown }> | undefined;
   if (!content) return [];
-  const json =
+  const media =
     content["application/json"] ||
     content["application/x-www-form-urlencoded"] ||
     content["multipart/form-data"];
-  if (!json?.schema) return [];
-  return extractSchemaPropertyNames(root, json.schema);
+  if (!media?.schema) return [];
+  return extractSchemaPropertyNames(root, media.schema);
 }
 
 export function parseOpenApiDocument(doc: unknown, source = "openapi"): ApiInventory {
@@ -123,19 +125,21 @@ export function parseOpenApiDocument(doc: unknown, source = "openapi"): ApiInven
         }
       }
       const rb = operation.requestBody as unknown;
-      const hasJsonBody = !!(
-        rb &&
-        typeof rb === "object" &&
-        ((rb as any).content?.["application/json"] ||
-          (rb as any).content?.["application/x-www-form-urlencoded"])
-      );
-      if (hasJsonBody) {
+      let bodyContentType: string | undefined;
+      if (rb && typeof rb === "object") {
+        const content = (rb as any).content || {};
+        if (content["application/json"]) bodyContentType = "application/json";
+        else if (content["application/x-www-form-urlencoded"]) bodyContentType = "application/x-www-form-urlencoded";
+        else if (content["multipart/form-data"]) bodyContentType = "multipart/form-data";
+      }
+      const hasJsonBody = bodyContentType === "application/json";
+      if (bodyContentType) {
         const bodyParams = bodyInjectParams(root, rb);
         for (const n of bodyParams) {
           if (!injectParams.includes(n)) injectParams.push(n);
         }
       }
-      if (hasJsonBody && injectParams.length === 0) {
+      if (bodyContentType && injectParams.length === 0) {
         injectParams.push("q", "id", "search", "url");
       }
       endpoints.push({
@@ -148,6 +152,7 @@ export function parseOpenApiDocument(doc: unknown, source = "openapi"): ApiInven
         isAdminLikely: isAdminPath(rawPath, tags),
         injectParams: injectParams.slice(0, 8),
         hasJsonBody,
+        contentType: bodyContentType,
       });
     }
   }
@@ -178,6 +183,7 @@ export function parseOpenApiDocument(doc: unknown, source = "openapi"): ApiInven
       method: e.method,
       params: e.injectParams?.length ? e.injectParams : ["q", "id", "url", "redirect"],
       hasJsonBody: e.hasJsonBody,
+      contentType: e.contentType,
       source: "openapi" as const,
     }));
 

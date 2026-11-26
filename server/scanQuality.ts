@@ -10,19 +10,33 @@ export type ProbeTarget = {
   /** Query/body param names to inject into */
   params?: string[];
   hasJsonBody?: boolean;
-  source?: "static" | "openapi" | "discovery";
+  /** application/json | application/x-www-form-urlencoded | multipart/form-data */
+  contentType?: string;
+  source?: "static" | "openapi" | "discovery" | "retest";
 };
 
-/** Normalize URL for correlation (drop fragment, collapse numeric IDs) */
+/** Normalize URL for correlation (keep param names, drop values, collapse numeric IDs) */
 export function normalizeAffectedUrl(url?: string | null): string {
   if (!url) return "";
   try {
     const u = new URL(url, "https://normalize.local");
     u.hash = "";
     const path = u.pathname.replace(/\/\d+(?=\/|$)/g, "/{id}");
-    return `${u.origin}${path}`.toLowerCase();
+    const keys = Array.from(u.searchParams.keys())
+      .map((k) => k.toLowerCase())
+      .sort();
+    const q = keys.length ? `?${keys.map((k) => `${k}=`).join("&")}` : "";
+    return `${u.origin}${path}${q}`.toLowerCase();
   } catch {
-    return String(url).toLowerCase().split("?")[0];
+    const raw = String(url).toLowerCase();
+    const [pathPart, queryPart] = raw.split("?");
+    if (!queryPart) return pathPart;
+    const keys = queryPart
+      .split("&")
+      .map((p) => p.split("=")[0])
+      .filter(Boolean)
+      .sort();
+    return keys.length ? `${pathPart}?${keys.map((k) => `${k}=`).join("&")}` : pathPart;
   }
 }
 
@@ -90,6 +104,23 @@ export function mergeEvidence(a?: string | null, b?: string | null): string | un
   return `${parts[0]}\n---\n${parts[1]}`.slice(0, 8000);
 }
 
+/** Coarse scanner family for corroboration counting */
+export function scannerFamily(category?: string | null): string {
+  const c = (category || "").toLowerCase();
+  if (c.includes("nuclei")) return "nuclei";
+  if (c.includes("zap")) return "zap";
+  if (c.includes("wapiti")) return "wapiti";
+  if (c.includes("nikto")) return "nikto";
+  if (c.includes("sast") || c.includes("semgrep")) return "sast";
+  if (c.includes("sca") || c.includes("dependency")) return "sca";
+  if (c.includes("sql")) return "sqli";
+  if (c.includes("xss")) return "xss";
+  if (c.includes("ssrf")) return "ssrf";
+  if (c.includes("graphql")) return "graphql";
+  if (c.includes("authorization") || c.includes("auth")) return "authz";
+  return c.split(/\s+/)[0] || "other";
+}
+
 /**
  * Replace the last numeric / {id}-like path segment with an injection payload.
  * Returns null when the path has no injectable segment.
@@ -119,9 +150,7 @@ export function pathInjectionTargets(
     if (out.length >= budget) break;
     const raw = typeof item === "string" ? item.split("?")[0] : item.path?.split("?")[0];
     if (!raw) continue;
-    // Only paths that look like resource IDs
     if (!/\/(?:\d+|\{[^}]+\})(?:\/|$)/.test(raw) && !/\/\{id\}/i.test(raw)) continue;
-    // Marker path used as baseline prefix (payload appended by caller via injectPathSegment)
     const concrete = raw.replace(/\{[^}]+\}/g, "1");
     push(concrete);
   }
@@ -150,7 +179,6 @@ export function mergeProbePaths(
         if (item.includes("?")) push(item.endsWith("=") || item.includes("=") ? item : `${item}&q=`);
         else if (/graphql|gql/i.test(item)) push(item);
         else if (/\/(?:\d+|\{[^}]+\})(?:\/|$)/.test(item)) {
-          // Path-id routes: keep concrete path for segment injection callers
           push(item.replace(/\{[^}]+\}/g, "1"));
         } else push(`${item}${item.includes("?") ? "&" : "?"}q=`);
       } else if (item.path) {
@@ -168,7 +196,6 @@ export function mergeProbePaths(
       }
     }
   }
-  // Reserve room for path-segment probes from inventory
   const pathIds = pathInjectionTargets(extra, Math.min(8, Math.max(2, Math.floor(budget / 4))));
   for (const p of pathIds) {
     if (out.length >= budget) break;
@@ -192,7 +219,6 @@ export function inventoryUrlsForDast(
     if (!raw) continue;
     const path = raw.split("?")[0].replace(/\{[^}]+\}/g, "1");
     if (!path.startsWith("/")) continue;
-    // Skip obvious write-only noise for GET-oriented DAST seeds
     const method = typeof item === "string" ? "GET" : (item.method || "GET").toUpperCase();
     if (method !== "GET" && method !== "HEAD") continue;
     const abs = `${origin}${path}`;
@@ -215,6 +241,29 @@ export function graphqlPathsFromInventory(extra?: ProbeTarget[] | string[]): str
   return Array.from(new Set([...extras, ...base]));
 }
 
+/**
+ * Parse lightweight injection targets from a GraphQL introspection JSON body.
+ * Looks for field(arg: ...) patterns and __schema type/field names.
+ */
+export function graphqlInjectionTargetsFromIntrospection(body: string): Array<{ field: string; arg: string }> {
+  const out: Array<{ field: string; arg: string }> = [];
+  const seen = new Set<string>();
+  // Match "name":"field","args":[{"name":"id"...}] style fragments loosely
+  const fieldArg = /"name"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"[\s\S]{0,120}?"args"\s*:\s*\[\s*\{\s*"name"\s*:\s*"([A-Za-z_][A-Za-z0-9_]*)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = fieldArg.exec(body)) !== null && out.length < 12) {
+    const key = `${m[1]}:${m[2]}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ field: m[1], arg: m[2] });
+  }
+  // Fallback common shapes
+  if (!out.length) {
+    out.push({ field: "user", arg: "id" }, { field: "users", arg: "id" }, { field: "search", arg: "q" });
+  }
+  return out;
+}
+
 /** Score weight: heuristic findings count less toward risk */
 export function confidenceScoreMultiplier(confidence?: FindingConfidence | null): number {
   if (confidence === "heuristic") return 0.5;
@@ -233,13 +282,72 @@ export function nucleiConfidenceFromRow(row: Record<string, unknown>): FindingCo
   if (sev === "info") return "heuristic";
   if (matchType.includes("http") || matchType.includes("dsl") || matchType.includes("word") || matchType.includes("regex")) {
     if (matcherStatus === true || matcherStatus === "true" || matcherStatus == null) {
-      // Extractors / curl present → stronger signal
       if (row["curl-command"] || row.extractor || row["extracted-results"]) return "confirmed";
       return "likely";
     }
   }
   if (row["curl-command"] && (matcherStatus === true || matcherStatus == null)) return "confirmed";
   return "likely";
+}
+
+/** Wapiti module/severity → confidence */
+export function wapitiConfidenceFromFinding(input: {
+  severity?: string;
+  name?: string;
+  module?: string;
+}): FindingConfidence {
+  const sev = (input.severity || "").toLowerCase();
+  const name = `${input.name || ""} ${input.module || ""}`.toLowerCase();
+  if (sev === "info" || /http.?headers|fingerprint|banner/i.test(name)) return "heuristic";
+  if (/sql|xss|ssrf|command|exec|lfi|rfi|ssti/i.test(name) && (sev === "high" || sev === "critical")) return "confirmed";
+  if (sev === "high" || sev === "critical") return "likely";
+  return "likely";
+}
+
+/** SCA confidence from fix availability + severity (+ optional EPSS) */
+export function scaConfidenceFromVuln(input: {
+  severity: string;
+  fixedVersion?: string | null;
+  epss?: number | null;
+}): FindingConfidence {
+  const epss = input.epss;
+  if (typeof epss === "number") {
+    if (epss >= 0.5) return "confirmed";
+    if (epss >= 0.1) return "likely";
+    return "heuristic";
+  }
+  const sev = input.severity.toLowerCase();
+  if (!input.fixedVersion && (sev === "low" || sev === "medium")) return "heuristic";
+  if (input.fixedVersion && (sev === "critical" || sev === "high")) return "likely";
+  if (sev === "critical") return "likely";
+  return "heuristic";
+}
+
+/** Build focused probe targets from a parent finding for retest */
+export function probeTargetsFromFinding(finding: {
+  affectedUrl?: string | null;
+  templateId?: string | null;
+  category?: string | null;
+  cweId?: string | null;
+}): ProbeTarget[] {
+  const out: ProbeTarget[] = [];
+  const url = finding.affectedUrl;
+  if (url) {
+    try {
+      const u = new URL(url, "https://normalize.local");
+      const path = u.pathname + (u.search || "");
+      const params = Array.from(u.searchParams.keys());
+      out.push({
+        path: path || "/",
+        method: "GET",
+        params: params.length ? params : ["q", "id", "url"],
+        source: "retest",
+      });
+    } catch {
+      out.push({ path: String(url), method: "GET", source: "retest" });
+    }
+  }
+  return out;
 }
 
 /** Map finding category / templateId → scanner tool ids for retest */
@@ -272,6 +380,7 @@ export function toolsForRetest(finding: {
   if (cat.includes("header")) push("headers");
   if (cat.includes("cors")) push("cors");
   if (cat.includes("sast") || cat.includes("semgrep")) push("sast");
+  if (cat.includes("sca") || cat.includes("dependency")) push("sca");
   if (tid.startsWith("openapi-post")) {
     push("sqli");
     push("xss");
