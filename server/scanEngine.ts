@@ -40,31 +40,8 @@
 import https from "https";
 import http from "http";
 import { URL } from "url";
-import { exec as execCb } from "child_process";
-import { promisify } from "util";
 import { appendScanLog, createFindings, updateScan, updateTarget, getPreviousCompletedScan, getFindingsByScan } from "./db";
-
-const execAsync = promisify(execCb);
-
-/** Run a command and always resolve with { stdout, stderr, code }; never reject on non-zero exit (so we can capture scanner output). */
-function execCapture(
-  command: string,
-  options: { timeout?: number; encoding?: BufferEncoding; maxBuffer?: number; env?: NodeJS.ProcessEnv }
-): Promise<{ stdout: string; stderr: string; code: number | null }> {
-  return new Promise((resolve, reject) => {
-    execCb(command, options, (err, stdout, stderr) => {
-      if (err && err.code === undefined && err.signal === undefined) {
-        reject(err);
-        return;
-      }
-      resolve({
-        stdout: typeof stdout === "string" ? stdout : String(stdout ?? ""),
-        stderr: typeof stderr === "string" ? stderr : String(stderr ?? ""),
-        code: err ? (err as { code?: number }).code ?? 1 : 0,
-      });
-    });
-  });
-}
+import { assertSafeOutboundUrl, runTool } from "./netSafety";
 import { InsertScanFinding } from "../drizzle/schema";
 import { getPenTestCache } from "./penTestUpdater";
 import { enrichFinding } from "./findingEnrichment";
@@ -1946,9 +1923,10 @@ async function testSSLTLS(scanId: number, targetUrl: string, _cookies?: string):
     if (testsslCmd) {
       await log(scanId, "info", "testssl.sh found — running deep TLS analysis (up to 3 minutes)...", "tls");
       const host = parsed.hostname + (parsed.port ? `:${parsed.port}` : "");
-      const { stdout } = await execCapture(
-        `${testsslCmd} --quiet --color 0 --severity LOW --sneaky ${host} 2>&1`,
-        { timeout: 180000, encoding: "utf8", maxBuffer: 4 * 1024 * 1024 }
+      const { output: stdout } = await runTool(
+        testsslCmd,
+        ["--quiet", "--color", "0", "--severity", "LOW", "--sneaky", host],
+        { timeout: 180000, maxBuffer: 4 * 1024 * 1024 }
       );
       if (stdout) {
         await log(scanId, "info", stdout.substring(0, 2000), "tls");
@@ -3037,21 +3015,29 @@ async function testPrototypePollution(scanId: number, targetUrl: string, cookies
 }
 
 /** Run SCA scanning using osv-scanner or trivy on a manifest file */
-async function testSCA(scanId: number, manifestPath: string): Promise<Finding[]> {
+async function testSCA(scanId: number, requestedPath: string): Promise<Finding[]> {
   const fs = await import("fs");
-  if (!fs.existsSync(manifestPath)) {
-    await log(scanId, "warn", `SCA manifest not found: ${manifestPath}`, "sca");
+  const path = await import("path");
+  const manifestDir = path.resolve(process.env.SCA_MANIFEST_DIR || path.join(process.cwd(), "data", "manifests"));
+  const candidate = path.resolve(manifestDir, requestedPath);
+  const basename = path.basename(candidate);
+  let manifestPath = "";
+  try {
+    const real = fs.realpathSync(candidate);
+    if (real.startsWith(manifestDir + path.sep) && MANIFEST_ECOSYSTEM[basename]) manifestPath = real;
+  } catch { /* missing */ }
+  if (!manifestPath) {
+    await log(scanId, "warn", `SCA manifest not found or not allowed: ${basename}`, "sca");
     return [];
   }
 
-  const basename = manifestPath.split("/").pop() ?? "";
   const ecosystem = MANIFEST_ECOSYSTEM[basename] ?? "Unknown";
   await log(scanId, "info", `SCA scanning ${basename} (${ecosystem} ecosystem)`, "sca");
 
   // Try OSV-Scanner first, then Trivy
   const scanners = [
-    { name: "osv-scanner", cmd: `osv-scanner --json --lockfile=${manifestPath}`, parser: parseOsvOutput },
-    { name: "trivy", cmd: `trivy fs --format json --scanners vuln ${manifestPath}`, parser: parseTrivyOutput },
+    { name: "osv-scanner", args: ["--json", `--lockfile=${manifestPath}`], parser: parseOsvOutput },
+    { name: "trivy", args: ["fs", "--format", "json", "--scanners", "vuln", "--", manifestPath], parser: parseTrivyOutput },
   ];
 
   for (const scanner of scanners) {
@@ -3065,8 +3051,8 @@ async function testSCA(scanId: number, manifestPath: string): Promise<Finding[]>
       }
 
       await log(scanId, "info", `Running ${scanner.name} on ${basename}...`, "sca");
-      const { stdout, stderr, code } = await execCapture(scanner.cmd, {
-        timeout: 120000, encoding: "utf8", maxBuffer: 4 * 1024 * 1024,
+      const { stdout, stderr } = await runTool(scanner.name, scanner.args, {
+        timeout: 120000, maxBuffer: 4 * 1024 * 1024,
       });
 
       const output = stdout || stderr || "";
@@ -3125,20 +3111,23 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       return findings;
     }
 
-    execSync(`git clone --depth 1 --single-branch ${repoUrl} ${cloneDir}`, {
-      timeout: 60000,
-      encoding: "utf8",
-      stdio: "pipe",
-    });
+    const safeRepo = await assertSafeOutboundUrl(repoUrl, { protocols: ["https:"] });
+    const clone = await runTool(
+      "git",
+      ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "clone", "--depth", "1", "--single-branch", "--", safeRepo.href, cloneDir],
+      { timeout: 60000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "https" } }
+    );
+    if (clone.code !== 0) throw new Error(`git clone failed: ${clone.stderr.substring(0, 200)}`);
     await log(scanId, "info", "Repository cloned successfully. Running Semgrep analysis...", "sast");
 
     let output = "";
     try {
-      const result = execSync(
-        `${semgrepCmd} --config auto --json --severity WARNING --severity ERROR --timeout 30 ${cloneDir} 2>/dev/null`,
-        { timeout: 300000, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 }
+      const result = await runTool(
+        semgrepCmd,
+        ["--config", "auto", "--json", "--severity", "WARNING", "--severity", "ERROR", "--timeout", "30", "--", cloneDir],
+        { timeout: 300000, maxBuffer: 16 * 1024 * 1024 }
       );
-      output = result;
+      output = result.stdout;
     } catch (err: any) {
       output = err.stdout ?? "";
       if (!output) {
@@ -3791,21 +3780,17 @@ export async function runScan(
             execSync(`${niktoCmd} -Version`, { stdio: "ignore", encoding: "utf8" });
             niktoAvailable = true;
             await log(scanId, "info", "Nikto found — running scan (up to 3 minutes; no further logs until it finishes)...", "nikto");
-            const niktoExtra = scanMode === "full" ? "-C all -maxtime 180" : "";
-            const niktoOpts = `-Format txt -nointeractive ${niktoExtra}`.trim();
+            const niktoArgs = ["-h", targetUrl, "-Format", "txt", "-nointeractive"];
+            if (scanMode === "full") niktoArgs.push("-C", "all", "-maxtime", "180");
             const execOpts = {
               timeout: 200000,
-              encoding: "utf8" as const,
               maxBuffer: 4 * 1024 * 1024,
               env: { ...process.env, PERL_LWP_SSL_VERIFY_HOSTNAME: "0" } as NodeJS.ProcessEnv,
             };
             let output = "";
             try {
-              const { stdout, stderr, code } = await execCapture(
-                `${niktoCmd} -h ${targetUrl} ${niktoOpts} 2>&1`,
-                execOpts
-              );
-              output = (stdout || stderr || "").trim();
+              const { output: combined, code } = await runTool(niktoCmd, niktoArgs, execOpts);
+              output = combined.trim();
               if (code !== 0 && output) {
                 await log(scanId, "info", "Nikto completed (non-zero exit often indicates findings; output above).", "nikto");
               }
@@ -3912,15 +3897,14 @@ export async function runScan(
             await log(scanId, "info", "Nuclei found — running template scan (up to 5 minutes; low/medium/high/critical + CVE/misconfig tags)...", "nuclei");
             let output = "";
             const nucleiSeverity = scanMode === "full" ? "low,medium,high,critical" : "medium,high,critical";
-            const nucleiTags = scanMode === "full" ? "-tags cve,misconfig,exposure,takeover" : "";
+            const nucleiArgs = ["-u", targetUrl, "-severity", nucleiSeverity, "-silent"];
+            if (scanMode === "full") nucleiArgs.push("-tags", "cve,misconfig,exposure,takeover");
             try {
-              const result = await execAsync(`${nucleiCmd} -u ${targetUrl} -severity ${nucleiSeverity} ${nucleiTags} -silent 2>&1`.trim(), {
+              const result = await runTool(nucleiCmd, nucleiArgs, {
                 timeout: 300000,
-                encoding: "utf8",
                 maxBuffer: 4 * 1024 * 1024,
               });
-              const res = result as { stdout?: string } | [string, string];
-              output = Array.isArray(res) ? (res[0] ?? "") : (res.stdout ?? "");
+              output = result.output;
             } catch (runErr: unknown) {
               const e = runErr as { stdout?: string; stderr?: string; message?: string };
               output = e?.stdout ?? e?.stderr ?? "";
@@ -3987,9 +3971,8 @@ export async function runScan(
           const wapitiOut = `/tmp/wapiti-${scanId}.json`;
           try {
             await log(scanId, "info", "Wapiti found — running crawl + modules (up to 5 minutes)...", "wapiti");
-            await execAsync(`${wapitiCmd} -u ${targetUrl} -f json -o ${wapitiOut} -v 0 --scope domain`, {
+            await runTool(wapitiCmd, ["-u", targetUrl, "-f", "json", "-o", wapitiOut, "-v", "0", "--scope", "domain"], {
               timeout: 300000,
-              encoding: "utf8",
               maxBuffer: 8 * 1024 * 1024,
             });
             const raw = await readFile(wapitiOut, "utf8").catch(() => "{}");
@@ -4031,12 +4014,10 @@ export async function runScan(
 
             const zapOutFile = `/tmp/zap-report-${scanId}.json`;
             await log(scanId, "info", "ZAP found — running quick scan (up to 5 minutes)...", "zap");
-            const { stdout } = await execAsync(`zap.sh -cmd -quickurl ${targetUrl} -quickout ${zapOutFile} -quickprogress 2>&1`, {
+            const { output: consoleOutput } = await runTool("zap.sh", ["-cmd", "-quickurl", targetUrl, "-quickout", zapOutFile, "-quickprogress"], {
               timeout: 300000,
-              encoding: "utf8",
               maxBuffer: 4 * 1024 * 1024,
             });
-            const consoleOutput = stdout ?? "";
             await log(scanId, "info", consoleOutput.substring(0, 2000), "zap");
 
             let zapAlertCount = 0;
