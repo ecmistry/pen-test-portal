@@ -244,6 +244,13 @@ export async function createFindings(data: InsertScanFinding[]) {
   await db.insert(scanFindings).values(data);
 }
 
+export async function getFindingById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(scanFindings).where(eq(scanFindings.id, id)).limit(1);
+  return result[0];
+}
+
 export async function updateFindingStatus(id: number, status: "open" | "acknowledged" | "resolved" | "false_positive") {
   const db = await getDb();
   if (!db) throw new Error("DB unavailable");

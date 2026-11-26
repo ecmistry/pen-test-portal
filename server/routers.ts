@@ -16,6 +16,7 @@ import {
   getAllTargets,
   getAllUsers,
   getDashboardStats,
+  getFindingById,
   getFindingsByScan,
   getLogsByScan,
   getRecentFindingsByUser,
@@ -25,6 +26,7 @@ import {
   getScanTrends,
   getScansByTarget,
   getScansByUser,
+  getScheduleById,
   getSchedulesByUser,
   getTargetById,
   getTargetsByUser,
@@ -40,6 +42,21 @@ import { runScan, analyzeAttackScenarios, type AuthScanConfig, type LoginCredent
 import { pushFindingsToTicketing, type IntegrationsConfig, type TicketResult } from "./ticketingIntegration";
 import { getPenTestCache, updatePenTestCapabilities } from "./penTestUpdater";
 import { enrichFinding } from "./findingEnrichment";
+import { assertSafeOutboundUrl, isHttpUrl } from "./netSafety";
+import { safeEqual } from "./_core/security";
+
+const httpUrl = z.string().max(2048).url().refine(isHttpUrl, "URL must use http or https");
+const httpsUrl = z.string().max(2048).url().refine(u => u.startsWith("https://") && isHttpUrl(u), "URL must use https");
+const toolList = z.array(z.string().max(64)).max(64);
+const listLimit = z.number().int().min(1).max(500);
+
+async function assertSafeUrlInput(url: string, protocols?: string[]) {
+  try {
+    await assertSafeOutboundUrl(url, { protocols });
+  } catch (err) {
+    throw new TRPCError({ code: "BAD_REQUEST", message: (err as Error).message });
+  }
+}
 
 // ─── Admin guard ──────────────────────────────────────────────────────────────
 const adminProcedure = protectedProcedure.use(({ ctx, next }) => {
@@ -161,14 +178,16 @@ export const appRouter = router({
       .input(
         z.object({
           name: z.string().min(1).max(255),
-          url: z.string().url(),
-          repoUrl: z.string().url().optional().or(z.literal("")),
-          description: z.string().optional(),
-          tags: z.string().optional(),
+          url: httpUrl,
+          repoUrl: httpsUrl.optional().or(z.literal("")),
+          description: z.string().max(5000).optional(),
+          tags: z.string().max(1000).optional(),
           scanFrequency: z.enum(["manual", "daily", "weekly", "monthly"]).default("manual"),
         })
       )
       .mutation(async ({ ctx, input }) => {
+        await assertSafeUrlInput(input.url);
+        if (input.repoUrl) await assertSafeUrlInput(input.repoUrl, ["https:"]);
         await createTarget({ ...input, userId: ctx.user.id });
         return { success: true };
       }),
@@ -178,10 +197,10 @@ export const appRouter = router({
         z.object({
           id: z.number(),
           name: z.string().min(1).max(255).optional(),
-          url: z.string().url().optional(),
-          repoUrl: z.string().url().optional().or(z.literal("")).or(z.null()),
-          description: z.string().optional(),
-          tags: z.string().optional(),
+          url: httpUrl.optional(),
+          repoUrl: httpsUrl.optional().or(z.literal("")).or(z.null()),
+          description: z.string().max(5000).optional(),
+          tags: z.string().max(1000).optional(),
           scanFrequency: z.enum(["manual", "daily", "weekly", "monthly"]).optional(),
           isActive: z.boolean().optional(),
         })
@@ -191,6 +210,8 @@ export const appRouter = router({
         const target = await getTargetById(id);
         if (!target) throw new TRPCError({ code: "NOT_FOUND" });
         assertOwnerOrAdmin(target.userId, ctx.user);
+        if (data.url) await assertSafeUrlInput(data.url);
+        if (data.repoUrl) await assertSafeUrlInput(data.repoUrl, ["https:"]);
         await updateTarget(id, data);
         return { success: true };
       }),
@@ -209,11 +230,12 @@ export const appRouter = router({
   // ─── Scans ────────────────────────────────────────────────────────────────
   scans: router({
     list: protectedProcedure
-      .input(z.object({ targetId: z.number().optional(), limit: z.number().default(50) }))
+      .input(z.object({ targetId: z.number().optional(), limit: listLimit.default(50) }))
       .query(async ({ ctx, input }) => {
-        if (input.targetId) {
+        if (input.targetId !== undefined) {
           const target = await getTargetById(input.targetId);
-          if (target) assertOwnerOrAdmin(target.userId, ctx.user);
+          if (!target) throw new TRPCError({ code: "NOT_FOUND" });
+          assertOwnerOrAdmin(target.userId, ctx.user);
           return getScansByTarget(input.targetId, input.limit);
         }
         if (ctx.user.role === "admin") return getAllScans(input.limit);
@@ -231,28 +253,28 @@ export const appRouter = router({
       .input(
         z.object({
           targetId: z.number(),
-          tools: z.array(z.string()).default(["headers", "auth", "sqli", "xss"]),
+          tools: toolList.default(["headers", "auth", "sqli", "xss"]),
           scanMode: z.enum(["light", "full"]).default("light"),
           authProfiles: z.array(z.object({
-            name: z.string(),
+            name: z.string().max(255),
             type: z.enum(["none", "bearer", "basic"]),
-            token: z.string().optional(),
-            username: z.string().optional(),
-            password: z.string().optional(),
-          })).optional(),
+            token: z.string().max(8192).optional(),
+            username: z.string().max(255).optional(),
+            password: z.string().max(1024).optional(),
+          })).max(10).optional(),
           authTests: z.object({
             verticalEscalation: z.boolean().optional(),
             horizontalEscalation: z.boolean().optional(),
             sessionExpiry: z.boolean().optional(),
             tokenReuse: z.boolean().optional(),
           }).optional(),
-          manifestPath: z.string().optional(),
+          manifestPath: z.string().max(255).optional(),
           loginCredentials: z.object({
-            loginUrl: z.string().url(),
-            username: z.string(),
-            password: z.string(),
-            usernameField: z.string().optional(),
-            passwordField: z.string().optional(),
+            loginUrl: httpUrl,
+            username: z.string().max(255),
+            password: z.string().max(1024),
+            usernameField: z.string().max(255).optional(),
+            passwordField: z.string().max(255).optional(),
             loginMethod: z.enum(["form", "json"]).optional(),
           }).optional(),
         })
@@ -261,6 +283,8 @@ export const appRouter = router({
         const target = await getTargetById(input.targetId);
         if (!target) throw new TRPCError({ code: "NOT_FOUND", message: "Target not found" });
         assertOwnerOrAdmin(target.userId, ctx.user);
+        await assertSafeUrlInput(target.url);
+        if (input.loginCredentials) await assertSafeUrlInput(input.loginCredentials.loginUrl);
 
         const toolsStr = input.tools.join(",");
         const scanId = await createScan({
@@ -306,6 +330,11 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const finding = await getFindingById(input.findingId);
+        if (!finding) throw new TRPCError({ code: "NOT_FOUND" });
+        const scan = await getScanById(finding.scanId);
+        if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+        assertOwnerOrAdmin(scan.userId, ctx.user);
         await updateFindingStatus(input.findingId, input.status);
         return { success: true };
       }),
@@ -318,7 +347,7 @@ export const appRouter = router({
           integrations: z.object({
             jira: z.object({
               enabled: z.boolean(),
-              baseUrl: z.string(),
+              baseUrl: httpsUrl,
               projectKey: z.string(),
               apiToken: z.string(),
               email: z.string(),
@@ -348,6 +377,7 @@ export const appRouter = router({
         const scan = await getScanById(input.scanId);
         if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
         assertOwnerOrAdmin(scan.userId, ctx.user);
+        if (input.integrations.jira?.enabled) await assertSafeUrlInput(input.integrations.jira.baseUrl, ["https:"]);
         const target = await getTargetById(scan.targetId);
         if (!target) throw new TRPCError({ code: "NOT_FOUND", message: "Target not found" });
         const findings = await getFindingsByScan(input.scanId);
@@ -484,8 +514,8 @@ export const appRouter = router({
       .input(
         z.object({
           targetId: z.number(),
-          cronExpression: z.string().min(1),
-          tools: z.array(z.string()).default(["headers", "auth", "sqli", "xss"]),
+          cronExpression: z.string().min(1).max(100),
+          tools: toolList.default(["headers", "auth", "sqli", "xss"]),
           enabled: z.boolean().default(true),
         })
       )
@@ -508,12 +538,15 @@ export const appRouter = router({
       .input(
         z.object({
           id: z.number(),
-          cronExpression: z.string().optional(),
-          tools: z.array(z.string()).optional(),
+          cronExpression: z.string().min(1).max(100).optional(),
+          tools: toolList.optional(),
           enabled: z.boolean().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
+        const schedule = await getScheduleById(input.id);
+        if (!schedule) throw new TRPCError({ code: "NOT_FOUND" });
+        assertOwnerOrAdmin(schedule.userId, ctx.user);
         const { id, tools, ...rest } = input;
         const data: Record<string, unknown> = { ...rest };
         if (tools) data.tools = tools.join(",");
@@ -524,6 +557,9 @@ export const appRouter = router({
     delete: protectedProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ ctx, input }) => {
+        const schedule = await getScheduleById(input.id);
+        if (!schedule) throw new TRPCError({ code: "NOT_FOUND" });
+        assertOwnerOrAdmin(schedule.userId, ctx.user);
         await deleteSchedule(input.id);
         return { success: true };
       }),
@@ -536,7 +572,7 @@ export const appRouter = router({
     }),
 
     trends: protectedProcedure
-      .input(z.object({ days: z.number().default(30) }))
+      .input(z.object({ days: z.number().int().min(1).max(365).default(30) }))
       .query(async ({ ctx, input }) => {
         return getScanTrends(ctx.user.id, ctx.user.role === "admin", input.days);
       }),
@@ -551,17 +587,18 @@ export const appRouter = router({
   cicd: router({
     scan: publicProcedure
       .input(z.object({
-        targetUrl: z.string().url(),
-        tools: z.array(z.string()).default(["headers", "auth", "sqli", "xss", "recon"]),
+        targetUrl: httpUrl,
+        tools: toolList.default(["headers", "auth", "sqli", "xss", "recon"]),
         scanMode: z.enum(["light", "full"]).default("light"),
         failOn: z.enum(["critical", "high", "medium", "low"]).default("high"),
-        apiKey: z.string().min(1),
+        apiKey: z.string().min(1).max(512),
       }))
       .mutation(async ({ input }) => {
         const expectedKey = process.env.CICD_API_KEY;
-        if (!expectedKey || input.apiKey !== expectedKey) {
+        if (!expectedKey || !safeEqual(input.apiKey, expectedKey)) {
           throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid CI/CD API key" });
         }
+        await assertSafeUrlInput(input.targetUrl);
 
         const ciUserId = 0;
         const ciTargetId = 0;
@@ -638,7 +675,7 @@ export const appRouter = router({
     }),
 
     allScans: adminProcedure
-      .input(z.object({ limit: z.number().default(100) }))
+      .input(z.object({ limit: listLimit.default(100) }))
       .query(async ({ input }) => {
         return getAllScans(input.limit);
       }),

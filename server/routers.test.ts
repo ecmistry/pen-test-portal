@@ -4,9 +4,9 @@ import type { TrpcContext } from "./_core/context";
 const mockDb = vi.hoisted(() => {
   const names = [
     "createReport", "createScan", "createSchedule", "createTarget", "deleteSchedule", "deleteTarget",
-    "getAllReports", "getAllScans", "getAllTargets", "getAllUsers", "getDashboardStats", "getFindingsByScan",
+    "getAllReports", "getAllScans", "getAllTargets", "getAllUsers", "getDashboardStats", "getFindingById", "getFindingsByScan",
     "getLogsByScan", "getRecentFindingsByUser", "getReportByScan", "getReportsByUser", "getScanById",
-    "getScanTrends", "getScansByTarget", "getScansByUser", "getSchedulesByUser", "getTargetById",
+    "getScanTrends", "getScansByTarget", "getScansByUser", "getScheduleById", "getSchedulesByUser", "getTargetById",
     "getTargetsByUser", "updateFindingStatus", "updateSchedule", "updateTarget", "updateUserRole",
   ];
   return Object.fromEntries(names.map((n) => [n, vi.fn()]));
@@ -475,7 +475,11 @@ describe("assertOwnerOrAdmin — admin override", () => {
 // ─── scans.updateFinding ─────────────────────────────────────────────────────
 
 describe("scans.updateFinding", () => {
+  const ownFinding = { id: 1, scanId: 100 } as any;
+
   it("updates finding status and returns success", async () => {
+    vi.mocked(db.getFindingById).mockResolvedValueOnce(ownFinding);
+    vi.mocked(db.getScanById).mockResolvedValueOnce(mockScan);
     vi.mocked(db.updateFindingStatus).mockResolvedValueOnce(undefined as any);
     const ctx = createContext(mockUser);
     const caller = appRouter.createCaller(ctx);
@@ -485,6 +489,8 @@ describe("scans.updateFinding", () => {
   });
 
   it("allows status false_positive", async () => {
+    vi.mocked(db.getFindingById).mockResolvedValueOnce(ownFinding);
+    vi.mocked(db.getScanById).mockResolvedValueOnce(mockScan);
     vi.mocked(db.updateFindingStatus).mockResolvedValueOnce(undefined as any);
     const ctx = createContext(mockUser);
     const caller = appRouter.createCaller(ctx);
@@ -493,11 +499,93 @@ describe("scans.updateFinding", () => {
   });
 
   it("allows status acknowledged", async () => {
+    vi.mocked(db.getFindingById).mockResolvedValueOnce(ownFinding);
+    vi.mocked(db.getScanById).mockResolvedValueOnce(mockScan);
     vi.mocked(db.updateFindingStatus).mockResolvedValueOnce(undefined as any);
     const ctx = createContext(mockUser);
     const caller = appRouter.createCaller(ctx);
     const result = await caller.scans.updateFinding({ findingId: 3, status: "acknowledged" });
     expect(result).toEqual({ success: true });
+  });
+
+  it("forbids updating a finding on another user's scan", async () => {
+    vi.mocked(db.getFindingById).mockResolvedValueOnce(ownFinding);
+    vi.mocked(db.getScanById).mockResolvedValueOnce({ ...mockScan, userId: 999 });
+    vi.mocked(db.updateFindingStatus).mockClear();
+    const caller = appRouter.createCaller(createContext(mockUser));
+    await expect(caller.scans.updateFinding({ findingId: 1, status: "resolved" })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(db.updateFindingStatus).not.toHaveBeenCalled();
+  });
+
+  it("returns NOT_FOUND for a missing finding", async () => {
+    vi.mocked(db.getFindingById).mockResolvedValueOnce(undefined);
+    const caller = appRouter.createCaller(createContext(mockUser));
+    await expect(caller.scans.updateFinding({ findingId: 404, status: "resolved" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+  });
+});
+
+describe("schedules ownership", () => {
+  const otherSchedule = { id: 5, userId: 999, targetId: 10 } as any;
+
+  it("forbids updating another user's schedule", async () => {
+    vi.mocked(db.getScheduleById).mockResolvedValueOnce(otherSchedule);
+    vi.mocked(db.updateSchedule).mockClear();
+    const caller = appRouter.createCaller(createContext(mockUser));
+    await expect(caller.schedules.update({ id: 5, enabled: false })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(db.updateSchedule).not.toHaveBeenCalled();
+  });
+
+  it("forbids deleting another user's schedule", async () => {
+    vi.mocked(db.getScheduleById).mockResolvedValueOnce(otherSchedule);
+    vi.mocked(db.deleteSchedule).mockClear();
+    const caller = appRouter.createCaller(createContext(mockUser));
+    await expect(caller.schedules.delete({ id: 5 })).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(db.deleteSchedule).not.toHaveBeenCalled();
+  });
+
+  it("allows the owner to delete their schedule", async () => {
+    vi.mocked(db.getScheduleById).mockResolvedValueOnce({ ...otherSchedule, userId: 1 });
+    vi.mocked(db.deleteSchedule).mockResolvedValueOnce(undefined as any);
+    const caller = appRouter.createCaller(createContext(mockUser));
+    await expect(caller.schedules.delete({ id: 5 })).resolves.toEqual({ success: true });
+  });
+});
+
+describe("target URL safety", () => {
+  it.each([
+    "http://169.254.169.254/latest/meta-data/",
+    "http://127.0.0.1:3306/",
+    "http://localhost:3000/",
+    "http://10.0.0.5/",
+    "http://[::1]/",
+  ])("rejects internal target %s", async (url) => {
+    vi.mocked(db.createTarget).mockClear();
+    const caller = appRouter.createCaller(createContext(mockUser));
+    await expect(caller.targets.create({ name: "x", url })).rejects.toMatchObject({ code: "BAD_REQUEST" });
+    expect(db.createTarget).not.toHaveBeenCalled();
+  });
+
+  it.each(["file:///etc/passwd", "gopher://example.com/", "https://user:pass@example.com/"])(
+    "rejects non-http or credentialed URL %s",
+    async (url) => {
+      const caller = appRouter.createCaller(createContext(mockUser));
+      await expect(caller.targets.create({ name: "x", url })).rejects.toBeTruthy();
+    }
+  );
+
+  it("rejects a repo URL that is not https", async () => {
+    const caller = appRouter.createCaller(createContext(mockUser));
+    await expect(
+      caller.targets.create({ name: "x", url: "https://example.com", repoUrl: "http://github.com/a/b" })
+    ).rejects.toBeTruthy();
+  });
+
+  it("does not list scans for a nonexistent target (e.g. CI scans with targetId 0)", async () => {
+    vi.mocked(db.getTargetById).mockResolvedValueOnce(undefined);
+    vi.mocked(db.getScansByTarget).mockClear();
+    const caller = appRouter.createCaller(createContext(mockUser));
+    await expect(caller.scans.list({ targetId: 0 })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(db.getScansByTarget).not.toHaveBeenCalled();
   });
 });
 

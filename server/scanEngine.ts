@@ -3612,6 +3612,16 @@ export async function runScan(
   await log(scanId, "info", `Tools: ${toolList.join(", ")}`, "init");
   await log(scanId, "info", `Scan ID: ${scanId}`, "init");
 
+  try {
+    await assertSafeOutboundUrl(targetUrl);
+    if (loginCredentials) await assertSafeOutboundUrl(loginCredentials.loginUrl);
+  } catch (err) {
+    const message = (err as Error).message;
+    await log(scanId, "error", `Scan blocked: ${message}`, "init");
+    await updateScan(scanId, { status: "failed", completedAt: new Date(), errorMessage: message });
+    return;
+  }
+
   const isAuthenticated = !!loginCredentials;
   const authModeValue: "authenticated" | "unauthenticated" = isAuthenticated ? "authenticated" : "unauthenticated";
   const scanAuthMeta: ScanAuthMeta = { authMode: authModeValue };
