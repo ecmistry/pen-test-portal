@@ -121,5 +121,11 @@ data/
 nikto_*.txt
 zap-report-*.json
 
+# Playwright
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
 # PEN ticket PDFs (sensitive reference documents)
 *.pdf
