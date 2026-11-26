@@ -7,6 +7,7 @@ import * as db from "../db";
 import { registerAdminAuthRoutes } from "./adminAuth";
 import { registerDevAuthRoutes } from "./devAuth";
 import { registerOAuthRoutes } from "./oauth";
+import { applySecurityMiddleware, assertSecureConfig } from "./security";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
@@ -31,14 +32,16 @@ async function findAvailablePort(startPort: number = 3000): Promise<number> {
 }
 
 async function startServer() {
+  assertSecureConfig();
+
   // Mark any scans left "running" or "queued" by a previous process as failed (e.g. after restart/crash)
   await db.failStaleScansOnStartup().catch((err) => console.warn("[Startup] failStaleScansOnStartup:", err.message));
 
   const app = express();
   const server = createServer(app);
-  // Configure body parser with larger size limit for file uploads
-  app.use(express.json({ limit: "50mb" }));
-  app.use(express.urlencoded({ limit: "50mb", extended: true }));
+  applySecurityMiddleware(app);
+  app.use(express.json({ limit: "2mb" }));
+  app.use(express.urlencoded({ limit: "100kb", extended: false }));
   registerOAuthRoutes(app);
   registerDevAuthRoutes(app);
   registerAdminAuthRoutes(app);
@@ -69,4 +72,7 @@ async function startServer() {
   });
 }
 
-startServer().catch(console.error);
+startServer().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

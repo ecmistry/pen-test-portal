@@ -1,8 +1,9 @@
-import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
+import { COOKIE_NAME, SESSION_TTL_MS } from "@shared/const";
 import type { Express, Request, Response } from "express";
 import * as db from "../db";
 import { getSessionCookieOptions } from "./cookies";
 import { ENV } from "./env";
+import { safeEqual } from "./security";
 import { sdk } from "./sdk";
 
 const ADMIN_LOGIN_HTML = `
@@ -40,7 +41,7 @@ export function registerAdminAuthRoutes(app: Express) {
       res.status(503).json({ success: false, error: "Database not configured." });
       return;
     }
-    if (email !== ENV.adminEmail || password !== ENV.adminPassword) {
+    if (!safeEqual(email, ENV.adminEmail) || !safeEqual(password, ENV.adminPassword)) {
       res.status(401).json({ success: false, error: "Invalid email or password." });
       return;
     }
@@ -56,10 +57,10 @@ export function registerAdminAuthRoutes(app: Express) {
       });
       const sessionToken = await sdk.createSessionToken(openId, {
         name: "Admin",
-        expiresInMs: ONE_YEAR_MS,
+        expiresInMs: SESSION_TTL_MS,
       });
       const cookieOptions = getSessionCookieOptions(req);
-      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
+      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: SESSION_TTL_MS });
       res.json({ success: true });
     } catch (error) {
       console.error("[Login] failed", error);
@@ -100,10 +101,7 @@ export function registerAdminAuthRoutes(app: Express) {
       return;
     }
 
-    if (
-      email !== ENV.adminEmail ||
-      password !== ENV.adminPassword
-    ) {
+    if (!safeEqual(email, ENV.adminEmail) || !safeEqual(password, ENV.adminPassword)) {
       res.status(401).type("html").send("<p>Invalid email or password.</p>");
       return;
     }
@@ -121,13 +119,12 @@ export function registerAdminAuthRoutes(app: Express) {
 
       const sessionToken = await sdk.createSessionToken(openId, {
         name: "Admin",
-        expiresInMs: ONE_YEAR_MS,
+        expiresInMs: SESSION_TTL_MS,
       });
 
       const cookieOptions = getSessionCookieOptions(req);
-      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
-      const redirectUrl = `${req.protocol}://${req.get("host") ?? "localhost:3000"}/`;
-      res.redirect(302, redirectUrl);
+      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: SESSION_TTL_MS });
+      res.redirect(302, "/");
     } catch (error) {
       console.error("[Admin Auth] Login failed", error);
       res.status(500).type("html").send("<p>Login failed.</p>");

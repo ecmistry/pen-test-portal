@@ -2,13 +2,13 @@ import { describe, expect, it } from "vitest";
 import { getSessionCookieOptions } from "./cookies";
 
 describe("getSessionCookieOptions", () => {
-  it("sets secure and sameSite none when protocol is https", () => {
+  it("sets secure and sameSite lax when protocol is https", () => {
     const opts = getSessionCookieOptions({
       protocol: "https",
       headers: {},
     } as any);
     expect(opts.secure).toBe(true);
-    expect(opts.sameSite).toBe("none");
+    expect(opts.sameSite).toBe("lax");
     expect(opts.httpOnly).toBe(true);
     expect(opts.path).toBe("/");
   });
@@ -19,7 +19,7 @@ describe("getSessionCookieOptions", () => {
       headers: { "x-forwarded-proto": "https" },
     } as any);
     expect(opts.secure).toBe(true);
-    expect(opts.sameSite).toBe("none");
+    expect(opts.sameSite).toBe("lax");
   });
 
   it("sets sameSite lax when not secure", () => {

@@ -1,4 +1,4 @@
-import { COOKIE_NAME, ONE_YEAR_MS } from "@shared/const";
+import { COOKIE_NAME, SESSION_TTL_MS } from "@shared/const";
 import type { Express, Request, Response } from "express";
 import * as db from "../db";
 import { getSessionCookieOptions } from "./cookies";
@@ -30,13 +30,12 @@ export function registerDevAuthRoutes(app: Express) {
 
       const sessionToken = await sdk.createSessionToken(DEV_OPEN_ID, {
         name: "Dev User",
-        expiresInMs: ONE_YEAR_MS,
+        expiresInMs: SESSION_TTL_MS,
       });
 
       const cookieOptions = getSessionCookieOptions(req);
-      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: ONE_YEAR_MS });
-      const redirectUrl = `${req.protocol}://${req.get("host") ?? "localhost:3000"}/`;
-      res.redirect(302, redirectUrl);
+      res.cookie(COOKIE_NAME, sessionToken, { ...cookieOptions, maxAge: SESSION_TTL_MS });
+      res.redirect(302, "/");
     } catch (error) {
       console.error("[Dev Auth] Login failed", error);
       res.status(500).json({ error: "Dev login failed" });
