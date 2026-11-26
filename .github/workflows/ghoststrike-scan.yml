@@ -131,3 +131,41 @@ PY
           done
           echo "Timed out waiting for scan"
           exit 1
+
+      - name: Download SARIF
+        if: always() && steps.start.outputs.scan_id != ''
+        env:
+          PORTAL_URL: ${{ secrets.GHOSTSTRIKE_URL }}
+          API_KEY: ${{ secrets.GHOSTSTRIKE_CICD_API_KEY }}
+          SCAN_ID: ${{ steps.start.outputs.scan_id }}
+        run: |
+          set -euo pipefail
+          RESP=$(curl -sS "${PORTAL_URL%/}/api/trpc/cicd.sarif?input=$(python3 -c "import urllib.parse,json; print(urllib.parse.quote(json.dumps({'json':{'scanId':int('${SCAN_ID}'),'apiKey':'${API_KEY}'}})))")")
+          echo "$RESP" > /tmp/gs-sarif-wrap.json
+          python3 - <<'PY'
+import json
+d=json.load(open("/tmp/gs-sarif-wrap.json"))
+def find(o,k):
+  if isinstance(o, dict):
+    if k in o: return o[k]
+    for v in o.values():
+      r=find(v,k)
+      if r is not None: return r
+  if isinstance(o, list):
+    for i in o:
+      r=find(i,k)
+      if r is not None: return r
+  return None
+sarif=find(d,"sarif")
+if not sarif:
+  raise SystemExit("SARIF missing from response")
+json.dump(sarif, open("ghoststrike.sarif.json","w"), indent=2)
+print("wrote ghoststrike.sarif.json")
+PY
+
+      - name: Upload SARIF to GitHub Code Scanning
+        if: always() && hashFiles('ghoststrike.sarif.json') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ghoststrike.sarif.json
+          category: ghoststrike

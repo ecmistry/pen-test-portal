@@ -19,12 +19,20 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [oidcEnabled, setOidcEnabled] = useState(false);
 
   useEffect(() => {
     if (!loading && isAuthenticated) {
       navigate("/dashboard");
     }
   }, [loading, isAuthenticated, navigate]);
+
+  useEffect(() => {
+    fetch("/api/oidc/enabled")
+      .then((r) => r.json())
+      .then((d) => setOidcEnabled(!!d?.enabled))
+      .catch(() => setOidcEnabled(false));
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -133,6 +141,20 @@ export default function Login() {
                   {submitting ? "Signing in…" : "Sign in"}
                 </Button>
               </form>
+              {oidcEnabled && (
+                <div className="mt-4 pt-4 border-t border-border">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    className="w-full"
+                    onClick={() => {
+                      window.location.href = "/api/oidc/login";
+                    }}
+                  >
+                    Sign in with SSO (OIDC)
+                  </Button>
+                </div>
+              )}
             </CardContent>
           </Card>
 

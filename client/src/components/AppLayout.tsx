@@ -26,6 +26,8 @@ const navItems = [
   { path: "/schedules", label: "Schedules", icon: Clock },
   { path: "/reports", label: "Reports", icon: FileText },
   { path: "/integrations", label: "Integrations", icon: Plug },
+  { path: "/policies", label: "Policies", icon: Settings },
+  { path: "/compliance", label: "Compliance", icon: BarChart3 },
   { path: "/methodology", label: "Methodology", icon: BookOpen },
 ];
 

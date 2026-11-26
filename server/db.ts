@@ -15,6 +15,7 @@ import {
   InsertSchedule,
   InsertTarget,
   InsertUser,
+  InsertScanPolicy,
   auditEvents,
   cicdApiKeys,
   findingWaivers,
@@ -25,6 +26,7 @@ import {
   scanFindings,
   scanJobs,
   scanLogs,
+  scanPolicies,
   scans,
   schedules,
   targets,
@@ -117,6 +119,27 @@ async function applyLightMigrations(db: ReturnType<typeof drizzle>) {
     `));
   } catch { /* exists */ }
   await safeAlter("ALTER TABLE integrations ADD COLUMN orgId INT DEFAULT NULL");
+  await safeAlter("ALTER TABLE users ADD COLUMN orgRole ENUM('org_admin','member','viewer','auditor') DEFAULT 'member'");
+  await safeAlter("ALTER TABLE targets ADD COLUMN environment VARCHAR(64) DEFAULT 'production'");
+  await safeAlter("ALTER TABLE targets ADD COLUMN policyId INT DEFAULT NULL");
+  try {
+    await db.execute(sql.raw(`
+      CREATE TABLE IF NOT EXISTS scan_policies (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        orgId INT NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        description TEXT NULL,
+        tools VARCHAR(500) NOT NULL,
+        scanMode VARCHAR(20) NOT NULL DEFAULT 'light',
+        failOnSeverity VARCHAR(20) NOT NULL DEFAULT 'high',
+        onlyNew BOOLEAN NOT NULL DEFAULT TRUE,
+        isDefault BOOLEAN NOT NULL DEFAULT FALSE,
+        createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_policies_org (orgId)
+      )
+    `));
+  } catch { /* exists */ }
   try {
     await db.execute(sql.raw(`
       CREATE TABLE IF NOT EXISTS finding_waivers (
@@ -383,11 +406,17 @@ export async function failStaleScansOnStartup(): Promise<number> {
       completedAt: now,
       errorMessage: "Scan interrupted (server restarted or process ended).",
     })
-    .where(sql`${scans.status} IN ('queued', 'running')`);
+    .where(sql`${scans.status} = 'running'`);
+  // Also fail scan_jobs stuck in running (queued durable jobs are recovered separately)
+  try {
+    await db.execute(sql.raw(
+      "UPDATE scan_jobs SET status='failed', completedAt=NOW(), errorMessage='Interrupted mid-run (process restart)' WHERE status='running'"
+    ));
+  } catch { /* table may not exist yet */ }
   const row = Array.isArray(result) ? result[0] : result;
   const affected = (row as { affectedRows?: number })?.affectedRows ?? 0;
   if (affected > 0) {
-    console.log(`[Startup] Marked ${affected} stale scan(s) as failed.`);
+    console.log(`[Startup] Marked ${affected} in-flight scan(s) as failed (queued durable jobs will recover).`);
   }
   return affected;
 }
@@ -881,4 +910,155 @@ export async function listScanArtifacts(scanId: number) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(scanArtifacts).where(eq(scanArtifacts.scanId, scanId)).orderBy(desc(scanArtifacts.createdAt));
+}
+
+// ─── Org RBAC ─────────────────────────────────────────────────────────────────
+export async function setUserOrgRole(
+  userId: number,
+  orgId: number,
+  orgRole: "org_admin" | "member" | "viewer" | "auditor"
+) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  await db.update(users).set({ orgId, orgRole }).where(eq(users.id, userId));
+}
+
+export async function getUsersByOrg(orgId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(users).where(eq(users.orgId, orgId)).orderBy(users.name);
+}
+
+// ─── Scan policies ────────────────────────────────────────────────────────────
+export async function listScanPolicies(orgId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(scanPolicies).where(eq(scanPolicies.orgId, orgId)).orderBy(desc(scanPolicies.createdAt));
+}
+
+export async function getScanPolicyById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(scanPolicies).where(eq(scanPolicies.id, id)).limit(1);
+  return rows[0];
+}
+
+export async function createScanPolicy(data: InsertScanPolicy) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  if (data.isDefault) {
+    await db.update(scanPolicies).set({ isDefault: false }).where(eq(scanPolicies.orgId, data.orgId));
+  }
+  const result = await db.insert(scanPolicies).values(data);
+  return (result as any)[0]?.insertId as number;
+}
+
+export async function updateScanPolicy(id: number, orgId: number, patch: Partial<InsertScanPolicy>) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  if (patch.isDefault) {
+    await db.update(scanPolicies).set({ isDefault: false }).where(eq(scanPolicies.orgId, orgId));
+  }
+  await db.update(scanPolicies).set(patch).where(and(eq(scanPolicies.id, id), eq(scanPolicies.orgId, orgId)));
+}
+
+export async function deleteScanPolicy(id: number, orgId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  await db.delete(scanPolicies).where(and(eq(scanPolicies.id, id), eq(scanPolicies.orgId, orgId)));
+}
+
+export async function getDefaultScanPolicy(orgId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(scanPolicies)
+    .where(and(eq(scanPolicies.orgId, orgId), eq(scanPolicies.isDefault, true))).limit(1);
+  return rows[0];
+}
+
+// ─── Compliance / coverage aggregates ─────────────────────────────────────────
+export async function getComplianceCoverage(orgId: number | null, isAdmin: boolean) {
+  const db = await getDb();
+  if (!db) {
+    return { byOwasp: [], bySeverity: [], toolCoverage: [], waiverCount: 0, openFindings: 0, mttrDays: null as number | null };
+  }
+  const whereOrg = orgId && !isAdmin ? sql`AND s.orgId = ${orgId}` : sql``;
+  const owasp = await db.execute(sql.raw(`
+    SELECT COALESCE(f.owaspCategory, 'Unmapped') AS label, COUNT(*) AS count
+    FROM scan_findings f
+    JOIN scans s ON s.id = f.scanId
+    WHERE f.status IN ('open','acknowledged') ${orgId && !isAdmin ? `AND s.orgId = ${orgId}` : ""}
+    GROUP BY COALESCE(f.owaspCategory, 'Unmapped')
+    ORDER BY count DESC
+    LIMIT 20
+  `));
+  const sev = await db.execute(sql.raw(`
+    SELECT f.severity AS label, COUNT(*) AS count
+    FROM scan_findings f
+    JOIN scans s ON s.id = f.scanId
+    WHERE f.status IN ('open','acknowledged') ${orgId && !isAdmin ? `AND s.orgId = ${orgId}` : ""}
+    GROUP BY f.severity
+  `));
+  const tools = await db.execute(sql.raw(`
+    SELECT TRIM(SUBSTRING_INDEX(SUBSTRING_INDEX(s.tools, ',', n.n), ',', -1)) AS tool, COUNT(*) AS scans
+    FROM scans s
+    JOIN (SELECT 1 n UNION SELECT 2 UNION SELECT 3 UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11 UNION SELECT 12) n
+      ON n.n <= 1 + LENGTH(s.tools) - LENGTH(REPLACE(s.tools, ',', ''))
+    WHERE s.status = 'completed' ${orgId && !isAdmin ? `AND s.orgId = ${orgId}` : ""}
+    GROUP BY tool
+    HAVING tool <> ''
+    ORDER BY scans DESC
+    LIMIT 30
+  `));
+  void whereOrg;
+  const waiverRows = orgId
+    ? await db.select({ c: sql<number>`COUNT(*)` }).from(findingWaivers).where(eq(findingWaivers.orgId, orgId))
+    : await db.select({ c: sql<number>`COUNT(*)` }).from(findingWaivers);
+  const openRows = await db.execute(sql.raw(`
+    SELECT COUNT(*) AS c FROM scan_findings f JOIN scans s ON s.id = f.scanId
+    WHERE f.status = 'open' ${orgId && !isAdmin ? `AND s.orgId = ${orgId}` : ""}
+  `));
+  const mttr = await db.execute(sql.raw(`
+    SELECT AVG(TIMESTAMPDIFF(DAY, f.createdAt, NOW())) AS days
+    FROM scan_findings f JOIN scans s ON s.id = f.scanId
+    WHERE f.status = 'resolved' ${orgId && !isAdmin ? `AND s.orgId = ${orgId}` : ""}
+  `));
+  const toArr = (r: any) => (Array.isArray(r) ? (Array.isArray(r[0]) ? r[0] : r) : []) as any[];
+  return {
+    byOwasp: toArr(owasp).map((x: any) => ({ label: x.label, count: Number(x.count) })),
+    bySeverity: toArr(sev).map((x: any) => ({ label: x.label, count: Number(x.count) })),
+    toolCoverage: toArr(tools).map((x: any) => ({ tool: x.tool, scans: Number(x.scans) })),
+    waiverCount: Number(waiverRows[0]?.c ?? 0),
+    openFindings: Number(toArr(openRows)[0]?.c ?? 0),
+    mttrDays: toArr(mttr)[0]?.days != null ? Number(toArr(mttr)[0].days) : null,
+  };
+}
+
+// ─── Artifact retention ───────────────────────────────────────────────────────
+export async function listExpiredArtifacts(olderThanDays: number) {
+  const db = await getDb();
+  if (!db) return [];
+  const cutoff = new Date(Date.now() - olderThanDays * 86400000);
+  return db.select().from(scanArtifacts).where(sql`${scanArtifacts.createdAt} < ${cutoff}`).limit(500);
+}
+
+export async function deleteScanArtifact(id: number) {
+  const db = await getDb();
+  if (!db) return;
+  await db.delete(scanArtifacts).where(eq(scanArtifacts.id, id));
+}
+
+export async function getScanArtifactById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(scanArtifacts).where(eq(scanArtifacts.id, id)).limit(1);
+  return rows[0];
+}
+
+export async function getTargetsByOrgAndEnv(orgId: number, environment: string) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(targets)
+    .where(and(eq(targets.orgId, orgId), eq(targets.environment, environment)))
+    .orderBy(desc(targets.createdAt));
 }

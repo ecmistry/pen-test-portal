@@ -31,6 +31,8 @@ export const users = mysqlTable("users", {
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
+  /** Org-scoped RBAC: org_admin | member | viewer | auditor */
+  orgRole: mysqlEnum("orgRole", ["org_admin", "member", "viewer", "auditor"]).default("member"),
   orgId: int("orgId"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -50,6 +52,10 @@ export const targets = mysqlTable("targets", {
   repoUrl: varchar("repoUrl", { length: 2048 }),
   description: text("description"),
   tags: varchar("tags", { length: 500 }),
+  /** Logical environment: development | staging | production | custom */
+  environment: varchar("environment", { length: 64 }).default("production"),
+  /** Optional org scan policy id for defaults */
+  policyId: int("policyId"),
   scanFrequency: mysqlEnum("scanFrequency", ["manual", "daily", "weekly", "monthly"]).default("manual").notNull(),
   isActive: boolean("isActive").default(true).notNull(),
   /** Default multi-role auth + login credentials for scheduled/CI scans */
@@ -270,3 +276,21 @@ export const reports = mysqlTable("reports", {
 
 export type Report = typeof reports.$inferSelect;
 export type InsertReport = typeof reports.$inferInsert;
+
+// ─── Org scan policy profiles ─────────────────────────────────────────────────
+export const scanPolicies = mysqlTable("scan_policies", {
+  id: int("id").autoincrement().primaryKey(),
+  orgId: int("orgId").notNull(),
+  name: varchar("name", { length: 255 }).notNull(),
+  description: text("description"),
+  tools: varchar("tools", { length: 500 }).notNull(),
+  scanMode: varchar("scanMode", { length: 20 }).default("light").notNull(),
+  failOnSeverity: varchar("failOnSeverity", { length: 20 }).default("high").notNull(),
+  onlyNew: boolean("onlyNew").default(true).notNull(),
+  isDefault: boolean("isDefault").default(false).notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type ScanPolicy = typeof scanPolicies.$inferSelect;
+export type InsertScanPolicy = typeof scanPolicies.$inferInsert;

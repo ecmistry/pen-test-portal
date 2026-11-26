@@ -57,8 +57,19 @@ import {
   validateCicdApiKey,
   writeAuditEvent,
   getOrganizationById,
+  setUserOrgRole,
+  listScanPolicies,
+  getScanPolicyById,
+  createScanPolicy,
+  updateScanPolicy,
+  deleteScanPolicy,
+  getDefaultScanPolicy,
+  getComplianceCoverage,
+  getScanArtifactById,
+  getTargetsByOrgAndEnv,
+  getUsersByOrg,
 } from "./db";
-import { enqueueScanDetached, getScanQueueStats } from "./scanQueue";
+import { enqueueDurableScan, enqueueScanDetached, getScanQueueStats } from "./scanQueue";
 import type { Scan, ScanFinding, Target } from "../drizzle/schema";
 import { generateExecutiveSummary, generateJSONReport, generateMarkdownReport } from "./reportGenerator";
 import { generateSarifReport } from "./sarif";
@@ -282,6 +293,8 @@ function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFindin
     authConfig: null,
     openapiUrl: null,
     manifestPath: null,
+    environment: "production",
+    policyId: null,
     lastScannedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -337,6 +350,20 @@ function assertOwnerOrgOrAdmin(
   throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
 }
 
+function assertCanWrite(ctxUser: { role: string; orgRole?: string | null }) {
+  if (ctxUser.role === "admin") return;
+  const orgRole = ctxUser.orgRole || "member";
+  if (orgRole === "viewer" || orgRole === "auditor") {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Read-only org role" });
+  }
+}
+
+function assertOrgAdmin(ctxUser: { role: string; orgRole?: string | null }) {
+  if (ctxUser.role === "admin") return;
+  if (ctxUser.orgRole === "org_admin") return;
+  throw new TRPCError({ code: "FORBIDDEN", message: "Org admin required" });
+}
+
 export const appRouter = router({
   system: systemRouter,
 
@@ -375,12 +402,15 @@ export const appRouter = router({
           description: z.string().max(5000).optional(),
           tags: z.string().max(1000).optional(),
           scanFrequency: z.enum(["manual", "daily", "weekly", "monthly"]).default("manual"),
+          environment: z.enum(["development", "staging", "production"]).or(z.string().max(64)).default("production"),
+          policyId: z.number().optional().nullable(),
           openapiUrl: httpUrl.optional().or(z.literal("")),
           manifestPath: z.string().max(500).optional().or(z.literal("")),
           authConfig: authConfigSchema.optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         await assertSafeUrlInput(input.url);
         if (input.repoUrl) await assertSafeUrlInput(input.repoUrl, ["https:"]);
         if (input.openapiUrl) await assertSafeUrlInput(input.openapiUrl);
@@ -394,6 +424,8 @@ export const appRouter = router({
           openapiUrl: openapiUrl || null,
           manifestPath: manifestPath || null,
           authConfig: authConfig ?? null,
+          environment: input.environment || "production",
+          policyId: input.policyId ?? null,
         });
         return { success: true };
       }),
@@ -409,16 +441,19 @@ export const appRouter = router({
           tags: z.string().max(1000).optional(),
           scanFrequency: z.enum(["manual", "daily", "weekly", "monthly"]).optional(),
           isActive: z.boolean().optional(),
+          environment: z.enum(["development", "staging", "production"]).or(z.string().max(64)).optional(),
+          policyId: z.number().nullable().optional(),
           openapiUrl: httpUrl.optional().or(z.literal("")).or(z.null()),
           manifestPath: z.string().max(500).optional().or(z.literal("")).or(z.null()),
           authConfig: authConfigSchema.nullable().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         const { id, ...data } = input;
         const target = await getTargetById(id);
         if (!target) throw new TRPCError({ code: "NOT_FOUND" });
-        assertOwnerOrAdmin(target.userId, ctx.user);
+        assertOwnerOrgOrAdmin(target, ctx.user);
         if (data.url) await assertSafeUrlInput(data.url);
         if (data.repoUrl) await assertSafeUrlInput(data.repoUrl, ["https:"]);
         if (data.openapiUrl) await assertSafeUrlInput(data.openapiUrl);
@@ -476,6 +511,31 @@ export const appRouter = router({
       return listScanArtifacts(input.scanId);
     }),
 
+    artifactContent: protectedProcedure
+      .input(z.object({ artifactId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const art = await getScanArtifactById(input.artifactId);
+        if (!art) throw new TRPCError({ code: "NOT_FOUND" });
+        const scan = await getScanById(art.scanId);
+        if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+        assertOwnerOrgOrAdmin(scan, ctx.user);
+        const { readArtifact } = await import("./artifactStore");
+        const buf = await readArtifact(art.storageKey);
+        if (!buf) throw new TRPCError({ code: "NOT_FOUND", message: "Artifact file missing" });
+        const text = buf.toString("utf8");
+        // Avoid huge payloads over tRPC
+        const truncated = text.length > 500_000;
+        return {
+          id: art.id,
+          tool: art.tool,
+          contentType: art.contentType,
+          storageKey: art.storageKey,
+          sizeBytes: art.sizeBytes,
+          truncated,
+          content: truncated ? text.slice(0, 500_000) : text,
+        };
+      }),
+
     start: protectedProcedure
       .input(
         z.object({
@@ -530,20 +590,19 @@ export const appRouter = router({
           await updateScan(scanId, { orgId });
         }
 
-        enqueueScanDetached(() =>
-          runScan(
-            scanId,
-            target.id,
-            target.url,
-            input.tools,
-            input.scanMode,
-            authConfig,
-            manifestPath ?? undefined,
-            loginCreds,
-            target.repoUrl ?? undefined,
-            openapiUrl ?? undefined
-          )
-        );
+        enqueueDurableScan({
+          scanId,
+          targetId: target.id,
+          targetUrl: target.url,
+          tools: input.tools,
+          scanMode: input.scanMode,
+          authConfig,
+          manifestPath: manifestPath ?? undefined,
+          loginCredentials: loginCreds,
+          repoUrl: target.repoUrl ?? undefined,
+          openapiUrl: openapiUrl ?? undefined,
+          userId: ctx.user.id,
+        });
 
         return { scanId, success: true, queue: getScanQueueStats() };
       }),
@@ -653,20 +712,19 @@ export const appRouter = router({
         });
 
         const storedAuth = (target.authConfig ?? undefined) as AuthScanConfig | undefined;
-        enqueueScanDetached(() =>
-          runScan(
-            scanId,
-            target.id,
-            target.url,
-            tools,
-            "light",
-            storedAuth,
-            (target as Target & { manifestPath?: string | null }).manifestPath ?? undefined,
-            storedAuth?.loginCredentials,
-            target.repoUrl ?? undefined,
-            (target as Target & { openapiUrl?: string | null }).openapiUrl ?? undefined
-          )
-        );
+        enqueueDurableScan({
+          scanId,
+          targetId: target.id,
+          targetUrl: target.url,
+          tools,
+          scanMode: "light",
+          authConfig: storedAuth,
+          manifestPath: (target as Target & { manifestPath?: string | null }).manifestPath ?? undefined,
+          loginCredentials: storedAuth?.loginCredentials,
+          repoUrl: target.repoUrl ?? undefined,
+          openapiUrl: (target as Target & { openapiUrl?: string | null }).openapiUrl ?? undefined,
+          userId: ctx.user.id,
+        });
 
         return { success: true, scanId, retestedFindingId: finding.id, parentFindingId: finding.id };
       }),
@@ -1048,16 +1106,20 @@ export const appRouter = router({
         return { success: true, id };
       }),
     assignUser: adminProcedure
-      .input(z.object({ userId: z.number(), orgId: z.number() }))
+      .input(z.object({
+        userId: z.number(),
+        orgId: z.number(),
+        orgRole: z.enum(["org_admin", "member", "viewer", "auditor"]).default("member"),
+      }))
       .mutation(async ({ ctx, input }) => {
-        await setUserOrg(input.userId, input.orgId);
+        await setUserOrgRole(input.userId, input.orgId, input.orgRole);
         await writeAuditEvent({
           orgId: input.orgId,
           userId: ctx.user.id,
           action: "org.assignUser",
           resourceType: "user",
           resourceId: String(input.userId),
-          meta: { orgId: input.orgId },
+          meta: { orgId: input.orgId, orgRole: input.orgRole },
         });
         return { success: true };
       }),
@@ -1098,6 +1160,8 @@ export const appRouter = router({
       .input(z.object({
         targetUrl: httpUrl.optional(),
         targetId: z.number().optional(),
+        environment: z.string().max(64).optional(),
+        policyId: z.number().optional(),
         tools: toolList.default([...LIGHT_DEFAULT_TOOLS]),
         scanMode: z.enum(["light", "full"]).default("light"),
         failOnSeverity: z.enum(["critical", "high", "medium", "low"]).optional(),
@@ -1124,8 +1188,14 @@ export const appRouter = router({
           }
         }
 
+        // Resolve by environment within org when no targetId/url
+        if (!target && auth.orgId && input.environment && !input.targetUrl) {
+          const envTargets = await getTargetsByOrgAndEnv(auth.orgId, input.environment);
+          target = envTargets[0];
+        }
+
         const targetUrl = target?.url || input.targetUrl;
-        if (!targetUrl) throw new TRPCError({ code: "BAD_REQUEST", message: "targetUrl or targetId required" });
+        if (!targetUrl) throw new TRPCError({ code: "BAD_REQUEST", message: "targetUrl, targetId, or environment required" });
         await assertSafeUrlInput(targetUrl);
 
         // Auto-bind by URL within org when targetId omitted
@@ -1133,14 +1203,38 @@ export const appRouter = router({
           target = await getTargetByUrlAndOrg(targetUrl, auth.orgId);
         }
 
-        const failThreshold = input.failOnSeverity ?? input.failOn ?? "high";
+        // Apply org policy defaults
+        let tools = input.tools;
+        let scanMode = input.scanMode;
+        let failThreshold = input.failOnSeverity ?? input.failOn ?? "high";
+        let onlyNew = input.onlyNew;
+        const policyId = input.policyId ?? target?.policyId ?? null;
+        if (policyId) {
+          const policy = await getScanPolicyById(policyId);
+          if (policy && (!auth.orgId || policy.orgId === auth.orgId || !auth.orgId)) {
+            if (!input.tools?.length || input.tools.join(",") === LIGHT_DEFAULT_TOOLS.join(",")) {
+              tools = policy.tools.split(",").map((t) => t.trim()).filter(Boolean);
+            }
+            if (!input.scanMode || input.scanMode === "light") scanMode = policy.scanMode as "light" | "full";
+            if (!input.failOnSeverity && !input.failOn) failThreshold = policy.failOnSeverity as any;
+            if (input.onlyNew === false && policy.onlyNew) onlyNew = true;
+            if (!input.onlyNew) onlyNew = !!policy.onlyNew;
+          }
+        } else if (auth.orgId) {
+          const def = await getDefaultScanPolicy(auth.orgId);
+          if (def && !input.failOnSeverity && !input.failOn) {
+            failThreshold = def.failOnSeverity as any;
+            onlyNew = input.onlyNew || !!def.onlyNew;
+          }
+        }
+
         const boundTargetId = target?.id ?? 0;
         const authConfig = target?.authConfig as AuthScanConfig | null | undefined;
         const scanId = await createScan({
           targetId: boundTargetId,
           userId: auth.userId || target?.userId || 0,
-          tools: input.tools.join(","),
-          scanMode: input.scanMode,
+          tools: tools.join(","),
+          scanMode,
           triggeredBy: "cicd",
           orgId: auth.orgId ?? target?.orgId ?? null,
           status: "queued",
@@ -1152,38 +1246,53 @@ export const appRouter = router({
           action: "cicd.scan",
           resourceType: "scan",
           resourceId: String(scanId),
-          meta: { targetId: boundTargetId, targetUrl, onlyNew: input.onlyNew },
+          meta: { targetId: boundTargetId, targetUrl, onlyNew, policyId },
         });
 
-        const job = () =>
-          runScan(
-            scanId,
-            boundTargetId,
-            targetUrl,
-            input.tools,
-            input.scanMode,
-            authConfig || undefined,
-            target?.manifestPath || undefined,
-            authConfig?.loginCredentials,
-            target?.repoUrl || undefined,
-            target?.openapiUrl || undefined
-          );
+        const payload = {
+          scanId,
+          targetId: boundTargetId,
+          targetUrl,
+          tools,
+          scanMode,
+          authConfig: authConfig || undefined,
+          manifestPath: target?.manifestPath || undefined,
+          loginCredentials: authConfig?.loginCredentials,
+          repoUrl: target?.repoUrl || undefined,
+          openapiUrl: target?.openapiUrl || undefined,
+          userId: auth.userId || target?.userId || 0,
+        };
 
-        const gateOpts = { onlyNew: input.onlyNew, orgId: auth.orgId ?? target?.orgId ?? null };
+        const gateOpts = { onlyNew, orgId: auth.orgId ?? target?.orgId ?? null };
 
         if (input.wait) {
-          const { enqueueScan } = await import("./scanQueue");
-          await enqueueScan(job);
+          const { enqueueScan, enqueueDurableScan: _ed } = await import("./scanQueue");
+          const { runScan: rs } = await import("./scanEngine");
+          await enqueueScan(async () => {
+            await rs(
+              payload.scanId,
+              payload.targetId,
+              payload.targetUrl,
+              payload.tools,
+              payload.scanMode as any,
+              payload.authConfig as any,
+              payload.manifestPath || undefined,
+              payload.loginCredentials as any,
+              payload.repoUrl || undefined,
+              payload.openapiUrl || undefined
+            );
+          }, scanId, payload);
           return buildCicdStatusPayload(scanId, targetUrl, failThreshold, gateOpts);
         }
 
-        enqueueScanDetached(job);
+        const { enqueueDurableScan } = await import("./scanQueue");
+        enqueueDurableScan(payload);
         return {
           scanId,
           targetId: boundTargetId || null,
           status: "queued" as const,
           failOnSeverity: failThreshold,
-          onlyNew: input.onlyNew,
+          onlyNew,
           queue: getScanQueueStats(),
           message: "Scan queued. Poll cicd.status until status is completed or failed.",
         };
@@ -1224,6 +1333,156 @@ export const appRouter = router({
         else incCounter("ghoststrike_cicd_gate_passes_total");
         return payload;
       }),
+
+    /** Fetch SARIF for Code Scanning upload (CI key auth) */
+    sarif: publicProcedure
+      .input(z.object({
+        scanId: z.number(),
+        apiKey: z.string().min(1).max(512),
+      }))
+      .query(async ({ input }) => {
+        const auth = await validateCicdApiKey(input.apiKey);
+        if (!auth.ok) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid CI/CD API key" });
+        const scan = await getScanById(input.scanId);
+        if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+        if (auth.userId !== 0 && scan.userId !== auth.userId) {
+          throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        const target = await getTargetById(scan.targetId);
+        if (!target && scan.targetId !== 0) throw new TRPCError({ code: "NOT_FOUND", message: "Target not found" });
+        const findings = await getFindingsByScan(input.scanId);
+        const fakeTarget = target || {
+          id: 0,
+          name: "CI target",
+          url: "https://example.invalid",
+        } as any;
+        return {
+          sarif: generateSarifReport({
+            scan,
+            target: fakeTarget,
+            findings,
+            generatedAt: new Date(),
+          }),
+        };
+      }),
+  }),
+
+  // ─── Scan policies ────────────────────────────────────────────────────────
+  policies: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+      if (!orgId) return [];
+      return listScanPolicies(orgId);
+    }),
+    create: protectedProcedure
+      .input(z.object({
+        name: z.string().min(1).max(255),
+        description: z.string().max(2000).optional(),
+        tools: toolList,
+        scanMode: z.enum(["light", "full"]).default("light"),
+        failOnSeverity: z.enum(["critical", "high", "medium", "low"]).default("high"),
+        onlyNew: z.boolean().default(true),
+        isDefault: z.boolean().default(false),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
+        assertOrgAdmin(ctx.user);
+        const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+        if (!orgId) throw new TRPCError({ code: "BAD_REQUEST", message: "No organization" });
+        const id = await createScanPolicy({
+          orgId,
+          name: input.name,
+          description: input.description ?? null,
+          tools: input.tools.join(","),
+          scanMode: input.scanMode,
+          failOnSeverity: input.failOnSeverity,
+          onlyNew: input.onlyNew,
+          isDefault: input.isDefault,
+        });
+        await writeAuditEvent({
+          orgId, userId: ctx.user.id, action: "policy.create",
+          resourceType: "policy", resourceId: String(id),
+        });
+        return { success: true, id };
+      }),
+    update: protectedProcedure
+      .input(z.object({
+        id: z.number(),
+        name: z.string().min(1).max(255).optional(),
+        description: z.string().max(2000).optional().nullable(),
+        tools: toolList.optional(),
+        scanMode: z.enum(["light", "full"]).optional(),
+        failOnSeverity: z.enum(["critical", "high", "medium", "low"]).optional(),
+        onlyNew: z.boolean().optional(),
+        isDefault: z.boolean().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        assertOrgAdmin(ctx.user);
+        const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+        if (!orgId) throw new TRPCError({ code: "BAD_REQUEST" });
+        const { id, tools, ...rest } = input;
+        await updateScanPolicy(id, orgId, {
+          ...rest,
+          ...(tools ? { tools: tools.join(",") } : {}),
+        });
+        return { success: true };
+      }),
+    delete: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        assertOrgAdmin(ctx.user);
+        const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+        if (!orgId) throw new TRPCError({ code: "BAD_REQUEST" });
+        await deleteScanPolicy(input.id, orgId);
+        return { success: true };
+      }),
+  }),
+
+  // ─── Compliance coverage ──────────────────────────────────────────────────
+  compliance: router({
+    coverage: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+      return getComplianceCoverage(orgId, ctx.user.role === "admin");
+    }),
+  }),
+
+  // ─── AI triage + SBOM ──────────────────────────────────────────────────────
+  insights: router({
+    triage: protectedProcedure
+      .input(z.object({ scanId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const scan = await getScanById(input.scanId);
+        if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+        assertOwnerOrgOrAdmin(scan, ctx.user);
+        const findings = await getFindingsByScan(input.scanId);
+        const { triageFindings } = await import("./aiTriage");
+        return triageFindings(findings.map((f) => ({
+          id: f.id,
+          title: f.title,
+          severity: f.severity,
+          category: f.category,
+          description: f.description,
+          cweId: f.cweId,
+        })));
+      }),
+    sbom: protectedProcedure
+      .input(z.object({ scanId: z.number() }))
+      .query(async ({ ctx, input }) => {
+        const scan = await getScanById(input.scanId);
+        if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+        assertOwnerOrgOrAdmin(scan, ctx.user);
+        const target = await getTargetById(scan.targetId);
+        const findings = await getFindingsByScan(input.scanId);
+        const { buildCycloneDxSbom, componentsFromScaFindings } = await import("./sbom");
+        const { components, vulnerabilities } = componentsFromScaFindings(findings);
+        return buildCycloneDxSbom({
+          targetName: target?.name || `target-${scan.targetId}`,
+          targetUrl: target?.url || "",
+          scanId: scan.id,
+          components,
+          vulnerabilities,
+        });
+      }),
   }),
 
   // ─── Admin ────────────────────────────────────────────────────────────────
@@ -1236,6 +1495,25 @@ export const appRouter = router({
       .input(z.object({ userId: z.number(), role: z.enum(["user", "admin"]) }))
       .mutation(async ({ input }) => {
         await updateUserRole(input.userId, input.role);
+        return { success: true };
+      }),
+
+    setOrgRole: adminProcedure
+      .input(z.object({
+        userId: z.number(),
+        orgId: z.number(),
+        orgRole: z.enum(["org_admin", "member", "viewer", "auditor"]),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        await setUserOrgRole(input.userId, input.orgId, input.orgRole);
+        await writeAuditEvent({
+          orgId: input.orgId,
+          userId: ctx.user.id,
+          action: "org.setRole",
+          resourceType: "user",
+          resourceId: String(input.userId),
+          meta: { orgRole: input.orgRole },
+        });
         return { success: true };
       }),
 
@@ -1264,6 +1542,10 @@ export const appRouter = router({
     scanQueueStats: adminProcedure.query(async () => {
       return getScanQueueStats();
     }),
+
+    orgMembers: adminProcedure
+      .input(z.object({ orgId: z.number() }))
+      .query(async ({ input }) => getUsersByOrg(input.orgId)),
   }),
 });
 

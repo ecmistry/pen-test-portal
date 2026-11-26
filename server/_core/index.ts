@@ -48,6 +48,8 @@ async function startServer() {
   registerOAuthRoutes(app);
   registerDevAuthRoutes(app);
   registerAdminAuthRoutes(app);
+  const { registerOidcRoutes } = await import("./oidc");
+  registerOidcRoutes(app);
 
   // Prometheus metrics
   app.get("/metrics", async (_req, res) => {
@@ -140,6 +142,9 @@ async function startServer() {
     import("../scheduleRunner")
       .then(({ startScheduleRunner }) => startScheduleRunner(60_000))
       .catch((err) => console.warn("[Startup] schedule runner failed to start:", err?.message || err));
+    import("../artifactRetention")
+      .then(({ startArtifactRetentionScheduler }) => startArtifactRetentionScheduler())
+      .catch((err) => console.warn("[Startup] artifact retention failed to start:", err?.message || err));
   });
 }
 

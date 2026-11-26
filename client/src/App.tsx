@@ -17,6 +17,8 @@ import Schedules from "./pages/Schedules";
 import AdminPanel from "./pages/AdminPanel";
 import Methodology from "./pages/Methodology";
 import Integrations from "./pages/Integrations";
+import Compliance from "./pages/Compliance";
+import Policies from "./pages/Policies";
 
 function Router() {
   return (
@@ -32,6 +34,8 @@ function Router() {
       <Route path="/demo-report" component={DemoReport} />
       <Route path="/schedules" component={Schedules} />
       <Route path="/integrations" component={Integrations} />
+      <Route path="/policies" component={Policies} />
+      <Route path="/compliance" component={Compliance} />
       <Route path="/methodology" component={Methodology} />
       <Route path="/admin" component={AdminPanel} />
       <Route path="/404" component={NotFound} />

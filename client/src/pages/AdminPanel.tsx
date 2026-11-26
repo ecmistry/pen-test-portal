@@ -186,7 +186,7 @@ export default function AdminPanel() {
                       value={u.orgId ?? ""}
                       onChange={(e) => {
                         const orgId = Number(e.target.value);
-                        if (orgId) assignOrgMutation.mutate({ userId: u.id, orgId });
+                        if (orgId) assignOrgMutation.mutate({ userId: u.id, orgId, orgRole: (u.orgRole || "member") as any });
                       }}
                       className="text-xs bg-input border border-border rounded px-2 py-1 text-foreground max-w-[140px]"
                     >
@@ -194,6 +194,23 @@ export default function AdminPanel() {
                       {(orgs ?? []).map((o) => (
                         <option key={o.id} value={o.id}>{o.name}</option>
                       ))}
+                    </select>
+                    <select
+                      value={u.orgRole || "member"}
+                      onChange={(e) => {
+                        if (!u.orgId) return toast.error("Assign an org first");
+                        assignOrgMutation.mutate({
+                          userId: u.id,
+                          orgId: u.orgId,
+                          orgRole: e.target.value as any,
+                        });
+                      }}
+                      className="text-xs bg-input border border-border rounded px-2 py-1 text-foreground max-w-[120px]"
+                    >
+                      <option value="org_admin">Org admin</option>
+                      <option value="member">Member</option>
+                      <option value="viewer">Viewer</option>
+                      <option value="auditor">Auditor</option>
                     </select>
                   </div>
                 </div>

@@ -30,6 +30,7 @@ interface TargetFormData {
   description: string;
   tags: string;
   scanFrequency: "manual" | "daily" | "weekly" | "monthly";
+  environment: string;
 }
 
 const defaultForm: TargetFormData = {
@@ -41,6 +42,7 @@ const defaultForm: TargetFormData = {
   description: "",
   tags: "",
   scanFrequency: "manual",
+  environment: "production",
 };
 
 interface AuthProfileForm {
@@ -144,6 +146,7 @@ export default function Targets() {
       description: t.description || "",
       tags: t.tags || "",
       scanFrequency: t.scanFrequency,
+      environment: (t as any).environment || "production",
     });
   }
 
@@ -166,6 +169,7 @@ export default function Targets() {
       repoUrl: form.repoUrl || undefined,
       openapiUrl: form.openapiUrl || undefined,
       manifestPath: form.manifestPath || undefined,
+      environment: form.environment || "production",
     };
     if (editTarget) {
       updateMutation.mutate({ id: editTarget.id, ...payload });
@@ -477,6 +481,17 @@ export default function Targets() {
             </div>
             <div>
               <Label className="text-foreground text-sm mb-1.5 block">Scan Frequency <span className="text-muted-foreground font-normal">(informational — use Schedules to run)</span></Label>
+              <div>
+                <Label className="text-sm">Environment</Label>
+                <Select value={form.environment} onValueChange={(v: any) => setForm({ ...form, environment: v })}>
+                  <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="development">Development</SelectItem>
+                    <SelectItem value="staging">Staging</SelectItem>
+                    <SelectItem value="production">Production</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
               <Select value={form.scanFrequency} onValueChange={(v: any) => setForm({ ...form, scanFrequency: v })}>
                 <SelectTrigger className="bg-input border-border text-foreground">
                   <SelectValue />

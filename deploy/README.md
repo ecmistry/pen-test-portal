@@ -116,7 +116,7 @@ curl -sS "https://ghoststrike.tech/api/trpc/cicd.status?input=..."
 
 A ready-made workflow is in `.github/workflows/ghoststrike-scan.yml` (secrets: `GHOSTSTRIKE_URL`, `GHOSTSTRIKE_CICD_API_KEY`, `GHOSTSTRIKE_TARGET_URL`; optional `GHOSTSTRIKE_TARGET_ID`; var `GHOSTSTRIKE_ONLY_NEW=true` for regression-only gates).
 
-Pass `onlyNew: true` on `cicd.scan` / `cicd.status` to fail only on new findings vs the target’s prior scan. Bind `targetId` so auth/OpenAPI/trend apply. Waivers (Integrations / Scan detail) suppress fingerprints from gates. Export SARIF via `reports.getSARIF` or the Report view download. Metrics: `GET /metrics`. Artifacts: local `ARTIFACT_DIR` or `ARTIFACT_S3_BUCKET`.
+Pass `onlyNew: true` on `cicd.scan` / `cicd.status` to fail only on new findings vs the target’s prior scan. Bind `targetId` / `environment` so auth/OpenAPI/trend apply. Org **Policies** set CI defaults. Waivers suppress fingerprints from gates. Export SARIF via `reports.getSARIF` or `cicd.sarif` (GHA uploads to Code Scanning). Metrics: `GET /metrics`. Artifacts: `ARTIFACT_DIR` / S3 + retention (`ARTIFACT_RETENTION_DAYS`). Enterprise SSO: `OIDC_*` env vars → `/api/oidc/login`.
 
 OOB SSRF: `OOB_CALLBACK_BASE` or native Interactsh via `INTERACTSH_SERVER` / `INTERACTSH_TOKEN`.
 

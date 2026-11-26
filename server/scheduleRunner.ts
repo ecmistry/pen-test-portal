@@ -7,17 +7,11 @@ import type { Schedule } from "../drizzle/schema";
 import {
   createScan,
   getAllSchedules,
-  getFindingsByScan,
-  getIntegrationByUser,
-  getScanById,
   getTargetById,
   updateSchedule,
 } from "./db";
 import type { AuthScanConfig, LoginCredentials } from "./scanEngine";
-import { runScan } from "./scanEngine";
-import { pushFindingsToTicketing } from "./ticketingIntegration";
-import { decryptIntegrationsConfig } from "./integrationsCrypto";
-import { enqueueScanDetached } from "./scanQueue";
+import { enqueueDurableScan } from "./scanQueue";
 
 const runningScheduleIds = new Set<number>();
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
@@ -141,39 +135,22 @@ export async function triggerScheduledScan(schedule: Schedule): Promise<number |
       nextRunAt: computeNextRunHint(),
     });
 
-    enqueueScanDetached(async () => {
-      try {
-        await runScan(
-          scanId,
-          target.id,
-          target.url,
-          tools,
-          scanMode,
-          profilesConfig,
-          manifestPath ?? undefined,
-          loginCredentials,
-          target.repoUrl ?? undefined,
-          openapiUrl ?? undefined,
-        );
-        const autoPush = (schedule as Schedule & { autoPushTicketing?: boolean | null }).autoPushTicketing;
-        if (autoPush) {
-          try {
-            const integration = await getIntegrationByUser(schedule.userId);
-            if (integration?.configEnc) {
-              const config = decryptIntegrationsConfig(integration.configEnc);
-              const findings = await getFindingsByScan(scanId);
-              const scan = await getScanById(scanId);
-              const t = scan ? await getTargetById(scan.targetId) : target;
-              await pushFindingsToTicketing(config, findings, t?.url ?? target.url, false);
-            }
-          } catch (err) {
-            console.warn("[ScheduleRunner] auto-push ticketing failed:", (err as Error).message);
-          }
-        }
-      } finally {
-        runningScheduleIds.delete(schedule.id);
-      }
+    enqueueDurableScan({
+      scanId,
+      targetId: target.id,
+      targetUrl: target.url,
+      tools,
+      scanMode,
+      authConfig: profilesConfig,
+      manifestPath: manifestPath ?? undefined,
+      loginCredentials,
+      repoUrl: target.repoUrl ?? undefined,
+      openapiUrl: openapiUrl ?? undefined,
+      scheduleId: schedule.id,
+      userId: schedule.userId,
     });
+    // Clear running lock after a short delay; durable job owns execution
+    setTimeout(() => runningScheduleIds.delete(schedule.id), 5000);
 
     return scanId;
   } catch (err) {

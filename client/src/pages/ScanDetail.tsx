@@ -102,8 +102,14 @@ export default function ScanDetail() {
     },
     onError: (e) => toast.error(e.message),
   });
+  const { data: artifacts } = trpc.scans.artifacts.useQuery({ scanId }, { enabled: !!scanId });
+  const triageMutation = trpc.insights.triage.useMutation({
+    onError: (e) => toast.error(e.message),
+  });
+  const { refetch: fetchSbom } = trpc.insights.sbom.useQuery({ scanId }, { enabled: false });
 
   const [sseLogs, setSseLogs] = useState<any[] | null>(null);
+  const [triage, setTriage] = useState<any | null>(null);
 
   // Prefer SSE for live logs while running; fall back to polling status
   useEffect(() => {
@@ -228,6 +234,42 @@ export default function ScanDetail() {
                   <FileText className="w-3.5 h-3.5" /> View Report
                 </span>
               </Link>
+            )}
+            {scan.status === "completed" && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-border text-foreground"
+                disabled={triageMutation.isPending}
+                onClick={async () => {
+                  const r = await triageMutation.mutateAsync({ scanId });
+                  setTriage(r);
+                  toast.success("AI triage ready");
+                }}
+              >
+                {triageMutation.isPending ? "Triaging…" : "AI Triage"}
+              </Button>
+            )}
+            {scan.status === "completed" && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-border text-foreground"
+                onClick={async () => {
+                  const r = await fetchSbom();
+                  if (r.data) {
+                    const blob = new Blob([JSON.stringify(r.data, null, 2)], { type: "application/json" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `sbom-scan-${scanId}.cdx.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  }
+                }}
+              >
+                SBOM
+              </Button>
             )}
             {scan.status === "completed" && (
               <Button
@@ -533,6 +575,54 @@ export default function ScanDetail() {
                 </div>
               );
             })}
+          </div>
+        )}
+
+        {triage && (
+          <div className="bg-card border border-border rounded-xl p-5 space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">AI triage</h3>
+            <p className="text-sm text-foreground/80">{triage.summary}</p>
+            <div className="space-y-2">
+              {(triage.clusters || []).map((c: any) => (
+                <div key={c.name} className="text-xs border border-border rounded-md p-2">
+                  <div className="font-medium text-foreground">{c.name}</div>
+                  <div className="text-muted-foreground">{c.rationale}</div>
+                  <div className="font-mono mt-1">IDs: {(c.findingIds || []).join(", ")}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {(artifacts?.length ?? 0) > 0 && (
+          <div className="bg-card border border-border rounded-xl p-5 space-y-3">
+            <h3 className="text-sm font-semibold text-foreground">Artifacts</h3>
+            <div className="divide-y divide-border rounded-lg border border-border">
+              {artifacts!.map((a) => (
+                <div key={a.id} className="flex items-center justify-between gap-3 p-3 text-sm">
+                  <div>
+                    <div className="text-foreground">{a.tool}</div>
+                    <div className="text-xs text-muted-foreground font-mono truncate">{a.storageKey}</div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={async () => {
+                      const res = await utils.scans.artifactContent.fetch({ artifactId: a.id });
+                      const blob = new Blob([res.content], { type: res.contentType || "text/plain" });
+                      const url = URL.createObjectURL(blob);
+                      const el = document.createElement("a");
+                      el.href = url;
+                      el.download = `scan-${scanId}-${a.tool}.txt`;
+                      el.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                  >
+                    Download
+                  </Button>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
