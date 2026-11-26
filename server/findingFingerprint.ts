@@ -7,13 +7,20 @@ export function findingFingerprint(input: {
   cweId?: string | null;
   affectedUrl?: string | null;
   templateId?: string | null;
+  sourceFile?: string | null;
+  sourceLine?: number | null;
 }): string {
   const title = (input.title || "").trim().toLowerCase();
   const category = (input.category || "").trim().toLowerCase();
   const cwe = (input.cweId || "").trim().toUpperCase();
-  const url = normalizeAffectedUrl(input.affectedUrl);
   const tid = (input.templateId || "").trim().toLowerCase();
-  // Prefer template+url when available; else cwe+url; else legacy title key
+  const src = (input.sourceFile || "").trim().toLowerCase().replace(/\\/g, "/");
+  const line = input.sourceLine != null ? String(input.sourceLine) : "";
+  // Prefer repo coordinates for SAST/Secrets
+  if (src && tid) return `${category}::${tid}::${src}:${line}`;
+  if (src && cwe) return `${category}::${cwe}::${src}:${line}`;
+  if (src) return `${category}::${title}::${src}:${line}`;
+  const url = normalizeAffectedUrl(input.affectedUrl);
   if (tid && url) return `${category}::${tid}::${url}`;
   if (cwe && url) return `${category}::${cwe}::${url}`;
   if (url) return `${category}::${title}::${cwe}::${url}`;
@@ -40,6 +47,8 @@ export function isWaivedFinding(
     cweId?: string | null;
     affectedUrl?: string | null;
     templateId?: string | null;
+    sourceFile?: string | null;
+    sourceLine?: number | null;
   },
   waived: Set<string>
 ): boolean {

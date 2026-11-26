@@ -287,6 +287,9 @@ function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFindin
     name: "Demo Application",
     url: "https://demo.example.com",
     repoUrl: null,
+    repoBranch: null,
+    repoRef: null,
+    repoSubpath: null,
     description: "Sample target for demo report",
     tags: null,
     scanFrequency: "manual",
@@ -402,6 +405,9 @@ export const appRouter = router({
           name: z.string().min(1).max(255),
           url: httpUrl,
           repoUrl: httpsUrl.optional().or(z.literal("")),
+          repoBranch: z.string().max(255).optional().or(z.literal("")),
+          repoRef: z.string().max(255).optional().or(z.literal("")),
+          repoSubpath: z.string().max(500).optional().or(z.literal("")),
           description: z.string().max(5000).optional(),
           tags: z.string().max(1000).optional(),
           scanFrequency: z.enum(["manual", "daily", "weekly", "monthly"]).default("manual"),
@@ -418,14 +424,18 @@ export const appRouter = router({
         if (input.repoUrl) await assertSafeUrlInput(input.repoUrl, ["https:"]);
         if (input.openapiUrl) await assertSafeUrlInput(input.openapiUrl);
         if (input.authConfig?.loginCredentials) await assertSafeUrlInput(input.authConfig.loginCredentials.loginUrl);
-        const { openapiUrl, manifestPath, authConfig, ...rest } = input;
+        const { openapiUrl, manifestPath, authConfig, repoBranch, repoRef, repoSubpath, ...rest } = input;
         const orgId = await ensureUserOrg(ctx.user.id);
         await createTarget({
           ...rest,
           userId: ctx.user.id,
           orgId: orgId ?? null,
+          repoUrl: rest.repoUrl || null,
           openapiUrl: openapiUrl || null,
           manifestPath: manifestPath || null,
+          repoBranch: repoBranch || null,
+          repoRef: repoRef || null,
+          repoSubpath: repoSubpath || null,
           authConfig: authConfig ?? null,
           environment: input.environment || "production",
           policyId: input.policyId ?? null,
@@ -440,6 +450,9 @@ export const appRouter = router({
           name: z.string().min(1).max(255).optional(),
           url: httpUrl.optional(),
           repoUrl: httpsUrl.optional().or(z.literal("")).or(z.null()),
+          repoBranch: z.string().max(255).optional().or(z.literal("")).or(z.null()),
+          repoRef: z.string().max(255).optional().or(z.literal("")).or(z.null()),
+          repoSubpath: z.string().max(500).optional().or(z.literal("")).or(z.null()),
           description: z.string().max(5000).optional(),
           tags: z.string().max(1000).optional(),
           scanFrequency: z.enum(["manual", "daily", "weekly", "monthly"]).optional(),
@@ -468,6 +481,9 @@ export const appRouter = router({
         if (patch.openapiUrl === "") patch.openapiUrl = null;
         if (patch.manifestPath === "") patch.manifestPath = null;
         if (patch.repoUrl === "") patch.repoUrl = null;
+        if ((patch as any).repoBranch === "") (patch as any).repoBranch = null;
+        if ((patch as any).repoRef === "") (patch as any).repoRef = null;
+        if ((patch as any).repoSubpath === "") (patch as any).repoSubpath = null;
         await updateTarget(id, patch as any);
         return { success: true };
       }),
@@ -603,6 +619,9 @@ export const appRouter = router({
           manifestPath: manifestPath ?? undefined,
           loginCredentials: loginCreds,
           repoUrl: target.repoUrl ?? undefined,
+          repoBranch: (target as any).repoBranch ?? undefined,
+          repoRef: (target as any).repoRef ?? undefined,
+          repoSubpath: (target as any).repoSubpath ?? undefined,
           openapiUrl: openapiUrl ?? undefined,
           userId: ctx.user.id,
         });
@@ -725,6 +744,9 @@ export const appRouter = router({
           manifestPath: (target as Target & { manifestPath?: string | null }).manifestPath ?? undefined,
           loginCredentials: storedAuth?.loginCredentials,
           repoUrl: target.repoUrl ?? undefined,
+          repoBranch: (target as any).repoBranch ?? undefined,
+          repoRef: (target as any).repoRef ?? undefined,
+          repoSubpath: (target as any).repoSubpath ?? undefined,
           openapiUrl: (target as Target & { openapiUrl?: string | null }).openapiUrl ?? undefined,
           userId: ctx.user.id,
         });
@@ -1171,6 +1193,11 @@ export const appRouter = router({
         policyId: z.number().optional(),
         tools: toolList.default([...LIGHT_DEFAULT_TOOLS]),
         scanMode: z.enum(["light", "full"]).default("light"),
+        repoUrl: httpsUrl.optional(),
+        repoBranch: z.string().max(255).optional(),
+        repoRef: z.string().max(255).optional(),
+        repoSubpath: z.string().max(500).optional(),
+        manifestPath: z.string().max(500).optional(),
         failOnSeverity: z.enum(["critical", "high", "medium", "low"]).optional(),
         failOn: z.enum(["critical", "high", "medium", "low"]).optional(),
         /** When true, only new (regression) findings fail the gate */
@@ -1263,9 +1290,12 @@ export const appRouter = router({
           tools,
           scanMode,
           authConfig: authConfig || undefined,
-          manifestPath: target?.manifestPath || undefined,
+          manifestPath: input.manifestPath || target?.manifestPath || undefined,
           loginCredentials: authConfig?.loginCredentials,
-          repoUrl: target?.repoUrl || undefined,
+          repoUrl: input.repoUrl || target?.repoUrl || undefined,
+          repoBranch: input.repoBranch || (target as any)?.repoBranch || undefined,
+          repoRef: input.repoRef || (target as any)?.repoRef || undefined,
+          repoSubpath: input.repoSubpath || (target as any)?.repoSubpath || undefined,
           openapiUrl: target?.openapiUrl || undefined,
           userId: auth.userId || target?.userId || 0,
         };
@@ -1286,7 +1316,12 @@ export const appRouter = router({
               payload.manifestPath || undefined,
               payload.loginCredentials as any,
               payload.repoUrl || undefined,
-              payload.openapiUrl || undefined
+              payload.openapiUrl || undefined,
+              {
+                branch: payload.repoBranch,
+                ref: payload.repoRef,
+                subpath: payload.repoSubpath,
+              }
             );
           }, scanId, payload);
           return buildCicdStatusPayload(scanId, targetUrl, failThreshold, gateOpts);

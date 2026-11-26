@@ -64,6 +64,9 @@ async function applyLightMigrations(db: ReturnType<typeof drizzle>) {
   await safeAlter("ALTER TABLE scan_findings ADD COLUMN sourceLine INT DEFAULT NULL");
   await safeAlter("ALTER TABLE scan_findings ADD COLUMN sourceSnippet TEXT DEFAULT NULL");
   await safeAlter("ALTER TABLE targets ADD COLUMN repoUrl VARCHAR(2048) DEFAULT NULL");
+  await safeAlter("ALTER TABLE targets ADD COLUMN repoBranch VARCHAR(255) DEFAULT NULL");
+  await safeAlter("ALTER TABLE targets ADD COLUMN repoRef VARCHAR(255) DEFAULT NULL");
+  await safeAlter("ALTER TABLE targets ADD COLUMN repoSubpath VARCHAR(500) DEFAULT NULL");
   await safeAlter("ALTER TABLE targets ADD COLUMN authConfig JSON DEFAULT NULL");
   await safeAlter("ALTER TABLE targets ADD COLUMN openapiUrl VARCHAR(2048) DEFAULT NULL");
   await safeAlter("ALTER TABLE targets ADD COLUMN manifestPath VARCHAR(500) DEFAULT NULL");

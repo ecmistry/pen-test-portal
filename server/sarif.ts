@@ -38,8 +38,11 @@ export function generateSarifReport(data: ReportData): object {
   const results = findings
     .filter((f) => f.status !== "false_positive" && f.status !== "resolved")
     .map((f) => {
-      const ruleId = f.cweId || `GS-${f.category.replace(/\s+/g, "-")}-${f.id}`;
-      const uri = (f as any).affectedUrl || (f as any).sourceFile || target.url;
+      const ruleId = (f as any).templateId || f.cweId || `GS-${f.category.replace(/\s+/g, "-")}-${f.id}`;
+      const sourceFile = (f as any).sourceFile as string | null | undefined;
+      const sourceLine = (f as any).sourceLine as number | null | undefined;
+      // Prefer repo-relative path for Code Scanning; fall back to URL
+      const uri = sourceFile || (f as any).affectedUrl || target.url;
       const result: Record<string, unknown> = {
         ruleId,
         level: SEVERITY_TO_LEVEL[f.severity] || "warning",
@@ -56,18 +59,18 @@ export function generateSarifReport(data: ReportData): object {
           {
             physicalLocation: {
               artifactLocation: { uri: String(uri) },
-              ...((f as any).sourceLine
-                ? { region: { startLine: (f as any).sourceLine } }
+              ...(sourceLine
+                ? { region: { startLine: sourceLine } }
                 : {}),
             },
           },
         ],
       };
-      if (f.evidence) {
-        result.partialFingerprints = {
-          primaryLocationLineHash: String(f.id),
-        };
-      }
+      result.partialFingerprints = {
+        primaryLocationLineHash: sourceFile
+          ? `${sourceFile}:${sourceLine || 0}:${(f as any).templateId || f.cweId || f.id}`
+          : String(f.id),
+      };
       return result;
     });
 

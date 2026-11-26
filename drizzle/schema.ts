@@ -50,6 +50,12 @@ export const targets = mysqlTable("targets", {
   name: varchar("name", { length: 255 }).notNull(),
   url: varchar("url", { length: 2048 }).notNull(),
   repoUrl: varchar("repoUrl", { length: 2048 }),
+  /** Optional git branch for SAST/SCA clone (default: remote default branch) */
+  repoBranch: varchar("repoBranch", { length: 255 }),
+  /** Optional git tag/SHA (overrides branch when set) */
+  repoRef: varchar("repoRef", { length: 255 }),
+  /** Optional subdirectory inside the repo to focus Semgrep/SCA */
+  repoSubpath: varchar("repoSubpath", { length: 500 }),
   description: text("description"),
   tags: varchar("tags", { length: 500 }),
   /** Logical environment: development | staging | production | custom */

@@ -16,6 +16,7 @@ export type ScanToolId =
   | "auth-roles"
   | "sca"
   | "sast"
+  | "secrets"
   | "ai-prompt"
   | "secret-leak"
   | "url-norm"
@@ -54,8 +55,9 @@ export const SCAN_TOOL_OPTIONS: ScanToolOption[] = [
   { value: "auth-roles", label: "Multi-Role AuthZ", group: "advanced" },
   { value: "sca", label: "SCA (Dependencies)", group: "advanced" },
   { value: "sast", label: "SAST (Semgrep)", group: "advanced" },
+  { value: "secrets", label: "Repo Secrets (Gitleaks)", group: "advanced" },
   { value: "ai-prompt", label: "AI Prompt Injection", group: "advanced" },
-  { value: "secret-leak", label: "Secret Leak", group: "advanced" },
+  { value: "secret-leak", label: "Secret Leak (API)", group: "advanced" },
   { value: "url-norm", label: "URL Normalisation", group: "advanced" },
   { value: "http-client", label: "HTTP Client Config", group: "advanced" },
   { value: "jwt", label: "JWT Security", group: "advanced" },

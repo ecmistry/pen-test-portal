@@ -21,6 +21,9 @@ jobs:
           TARGET_URL: ${{ github.event.inputs.target_url || secrets.GHOSTSTRIKE_TARGET_URL }}
           TARGET_ID: ${{ secrets.GHOSTSTRIKE_TARGET_ID }}
           ONLY_NEW: ${{ vars.GHOSTSTRIKE_ONLY_NEW }}
+          SCAN_MODE: ${{ vars.GHOSTSTRIKE_SCAN_MODE }}
+          REPO_URL: ${{ vars.GHOSTSTRIKE_REPO_URL }}
+          REPO_REF: ${{ github.sha }}
         run: |
           set -euo pipefail
           if [ -z "${PORTAL_URL:-}" ] || [ -z "${API_KEY:-}" ] || [ -z "${TARGET_URL:-}" ]; then
@@ -32,7 +35,8 @@ jobs:
 import json, os
 d={
   "targetUrl": os.environ["TARGET_URL"],
-  "scanMode": "light",
+  # Prefer full for GitHub repo SAST/SCA; override with GHOSTSTRIKE_SCAN_MODE=light if needed
+  "scanMode": (os.environ.get("SCAN_MODE") or "full").strip() or "full",
   "failOnSeverity": "high",
   "apiKey": os.environ["API_KEY"],
   "wait": False,
@@ -41,6 +45,13 @@ d={
 tid=(os.environ.get("TARGET_ID") or "").strip()
 if tid.isdigit():
   d["targetId"]=int(tid)
+repo=(os.environ.get("REPO_URL") or "").strip()
+if repo:
+  d["repoUrl"]=repo
+  # Pin to the PR/commit under test when scanning the calling repo
+  ref=(os.environ.get("REPO_REF") or "").strip()
+  if ref:
+    d["repoRef"]=ref
 print(json.dumps({"json": d}))
 PY
 )

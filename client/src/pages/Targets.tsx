@@ -25,6 +25,9 @@ interface TargetFormData {
   name: string;
   url: string;
   repoUrl: string;
+  repoBranch: string;
+  repoRef: string;
+  repoSubpath: string;
   openapiUrl: string;
   manifestPath: string;
   description: string;
@@ -37,6 +40,9 @@ const defaultForm: TargetFormData = {
   name: "",
   url: "",
   repoUrl: "",
+  repoBranch: "",
+  repoRef: "",
+  repoSubpath: "",
   openapiUrl: "",
   manifestPath: "",
   description: "",
@@ -141,6 +147,9 @@ export default function Targets() {
       name: t.name,
       url: t.url,
       repoUrl: t.repoUrl || "",
+      repoBranch: (t as any).repoBranch || "",
+      repoRef: (t as any).repoRef || "",
+      repoSubpath: (t as any).repoSubpath || "",
       openapiUrl: t.openapiUrl || "",
       manifestPath: t.manifestPath || "",
       description: t.description || "",
@@ -167,6 +176,9 @@ export default function Targets() {
     const payload = {
       ...form,
       repoUrl: form.repoUrl || undefined,
+      repoBranch: form.repoBranch || undefined,
+      repoRef: form.repoRef || undefined,
+      repoSubpath: form.repoSubpath || undefined,
       openapiUrl: form.openapiUrl || undefined,
       manifestPath: form.manifestPath || undefined,
       environment: form.environment || "production",
@@ -441,7 +453,21 @@ export default function Targets() {
                 onChange={(e) => setForm({ ...form, repoUrl: e.target.value })}
                 className="bg-input border-border text-foreground placeholder:text-muted-foreground"
               />
-              <p className="text-xs text-muted-foreground mt-1">Git repository URL to enable source code analysis (Semgrep). Leave blank to skip SAST.</p>
+              <p className="text-xs text-muted-foreground mt-1">Git HTTPS URL for Semgrep/SCA/secrets (set GITHUB_TOKEN on scanner for private repos).</p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <Label className="text-foreground text-sm mb-1.5 block">Branch</Label>
+                <Input placeholder="main" value={form.repoBranch} onChange={(e) => setForm({ ...form, repoBranch: e.target.value })} className="bg-input border-border text-foreground placeholder:text-muted-foreground" />
+              </div>
+              <div>
+                <Label className="text-foreground text-sm mb-1.5 block">Ref / tag</Label>
+                <Input placeholder="v1.2.3" value={form.repoRef} onChange={(e) => setForm({ ...form, repoRef: e.target.value })} className="bg-input border-border text-foreground placeholder:text-muted-foreground" />
+              </div>
+              <div>
+                <Label className="text-foreground text-sm mb-1.5 block">Subpath</Label>
+                <Input placeholder="gravitee-apim-rest-api" value={form.repoSubpath} onChange={(e) => setForm({ ...form, repoSubpath: e.target.value })} className="bg-input border-border text-foreground placeholder:text-muted-foreground" />
+              </div>
             </div>
             <div>
               <Label className="text-foreground text-sm mb-1.5 block">OpenAPI URL <span className="text-muted-foreground font-normal">(API inventory)</span></Label>
@@ -453,13 +479,14 @@ export default function Targets() {
               />
             </div>
             <div>
-              <Label className="text-foreground text-sm mb-1.5 block">SCA manifest path <span className="text-muted-foreground font-normal">(server path)</span></Label>
+              <Label className="text-foreground text-sm mb-1.5 block">SCA manifest <span className="text-muted-foreground font-normal">(optional staged basename)</span></Label>
               <Input
-                placeholder="/path/to/package-lock.json"
+                placeholder="package-lock.json (or leave blank to scan cloned repo)"
                 value={form.manifestPath}
                 onChange={(e) => setForm({ ...form, manifestPath: e.target.value })}
                 className="bg-input border-border text-foreground placeholder:text-muted-foreground"
               />
+              <p className="text-xs text-muted-foreground mt-1">With a Repository URL, SCA discovers lockfiles in the clone automatically.</p>
             </div>
             <div>
               <Label className="text-foreground text-sm mb-1.5 block">Description</Label>

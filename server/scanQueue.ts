@@ -112,7 +112,12 @@ export function enqueueDurableScan(payload: ScanJobPayload): void {
       payload.manifestPath || undefined,
       payload.loginCredentials as any,
       payload.repoUrl || undefined,
-      payload.openapiUrl || undefined
+      payload.openapiUrl || undefined,
+      {
+        branch: payload.repoBranch,
+        ref: payload.repoRef,
+        subpath: payload.repoSubpath,
+      }
     );
 
     if (payload.scheduleId) {

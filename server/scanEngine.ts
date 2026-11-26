@@ -67,6 +67,14 @@ import {
   probeTargetsFromFinding,
   scannerFamily,
 } from "./scanQuality";
+import {
+  cloneGitRepo,
+  cleanupClone,
+  discoverLockfiles,
+  buildSemgrepArgs,
+  severityRank,
+  writeScanArtifact,
+} from "./repoScan";
 import { findingFingerprint, isWaivedFinding } from "./findingFingerprint";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -2636,14 +2644,16 @@ const SCORE_CAP: Record<Finding["severity"], { deduction: number; maxCount: numb
 
 // ─── SCA / Dependency Scanning ────────────────────────────────────────────────
 
-export type ManifestType = "pom.xml" | "build.gradle" | "package.json" | "package-lock.json" |
-  "requirements.txt" | "Pipfile.lock" | "go.mod" | "Gemfile.lock";
+export type ManifestType = string;
 
 const MANIFEST_ECOSYSTEM: Record<string, string> = {
-  "pom.xml": "Maven", "build.gradle": "Maven",
-  "package.json": "npm", "package-lock.json": "npm",
-  "requirements.txt": "PyPI", "Pipfile.lock": "PyPI",
-  "go.mod": "Go", "Gemfile.lock": "RubyGems",
+  "pom.xml": "Maven", "build.gradle": "Maven", "build.gradle.kts": "Maven", "gradle.lockfile": "Maven",
+  "package.json": "npm", "package-lock.json": "npm", "yarn.lock": "npm", "pnpm-lock.yaml": "npm",
+  "requirements.txt": "PyPI", "Pipfile.lock": "PyPI", "poetry.lock": "PyPI",
+  "go.mod": "Go", "go.sum": "Go",
+  "Gemfile.lock": "RubyGems",
+  "Cargo.lock": "crates.io",
+  "composer.lock": "Packagist",
 };
 
 export interface ScaDependencyVuln {
@@ -3531,86 +3541,155 @@ async function testPrototypePollution(scanId: number, targetUrl: string, cookies
   return findings;
 }
 
-/** Run SCA scanning using osv-scanner or trivy on a manifest file */
-async function testSCA(scanId: number, requestedPath: string): Promise<Finding[]> {
-  const fs = await import("fs");
+
+/** Run SCA on a staged manifest basename and/or a cloned repo directory */
+async function testSCA(
+  scanId: number,
+  requestedPath?: string,
+  opts?: { cloneDir?: string; scanRoot?: string }
+): Promise<Finding[]> {
+  const findings: Finding[] = [];
   const path = await import("path");
-  const manifestDir = path.resolve(process.env.SCA_MANIFEST_DIR || path.join(process.cwd(), "data", "manifests"));
-  const candidate = path.resolve(manifestDir, requestedPath);
-  const basename = path.basename(candidate);
-  let manifestPath = "";
-  try {
-    const real = fs.realpathSync(candidate);
-    if (real.startsWith(manifestDir + path.sep) && MANIFEST_ECOSYSTEM[basename]) manifestPath = real;
-  } catch { /* missing */ }
-  if (!manifestPath) {
-    await log(scanId, "warn", `SCA manifest not found or not allowed: ${basename}`, "sca");
+  const fs = await import("fs");
+
+  const vulnsAll: ScaDependencyVuln[] = [];
+  let ecosystem = "Unknown";
+
+  // 1) Staged single manifest (legacy)
+  if (requestedPath) {
+    const manifestDir = path.resolve(process.env.SCA_MANIFEST_DIR || path.join(process.cwd(), "data", "manifests"));
+    const candidate = path.resolve(manifestDir, requestedPath);
+    const basename = path.basename(candidate);
+    let manifestPath = "";
+    try {
+      const real = fs.realpathSync(candidate);
+      if (real.startsWith(manifestDir + path.sep) && MANIFEST_ECOSYSTEM[basename]) manifestPath = real;
+    } catch { /* missing */ }
+    if (manifestPath) {
+      ecosystem = MANIFEST_ECOSYSTEM[basename] ?? "Unknown";
+      await log(scanId, "info", `SCA scanning staged manifest ${basename} (${ecosystem})`, "sca");
+      const staged = await runScaScanners(scanId, { lockfile: manifestPath, dir: null });
+      vulnsAll.push(...staged);
+    } else {
+      await log(scanId, "warn", `SCA staged manifest not found or not allowed: ${basename}`, "sca");
+    }
+  }
+
+  // 2) Cloned repo — discover lockfiles + directory scan
+  const scanRoot = opts?.scanRoot || opts?.cloneDir;
+  if (scanRoot && fs.existsSync(scanRoot)) {
+    const locks = discoverLockfiles(scanRoot, 40);
+    await log(scanId, "info", `SCA on clone: discovered ${locks.length} manifest/lockfile(s)`, "sca");
+    if (locks.length) {
+      ecosystem = locks[0].ecosystem;
+      // Cap individual lockfile scans
+      for (const lock of locks.slice(0, 15)) {
+        const found = await runScaScanners(scanId, { lockfile: lock.path, dir: null });
+        for (const v of found) {
+          if (!vulnsAll.some((x) => x.cve === v.cve && x.package === v.package && x.installedVersion === v.installedVersion)) {
+            vulnsAll.push(v);
+          }
+        }
+      }
+    }
+    // Directory-wide Trivy/OSV as catch-all
+    const dirVulns = await runScaScanners(scanId, { lockfile: null, dir: scanRoot });
+    for (const v of dirVulns) {
+      if (!vulnsAll.some((x) => x.cve === v.cve && x.package === v.package && x.installedVersion === v.installedVersion)) {
+        vulnsAll.push(v);
+      }
+    }
+  }
+
+  if (vulnsAll.length === 0) {
+    if (!requestedPath && !scanRoot) {
+      await log(scanId, "info", "SCA skipped — no manifestPath or repo clone", "sca");
+      return [];
+    }
+    await log(scanId, "success", "SCA scan: PASS — no vulnerable dependencies found", "sca");
     return [];
   }
 
-  const ecosystem = MANIFEST_ECOSYSTEM[basename] ?? "Unknown";
-  await log(scanId, "info", `SCA scanning ${basename} (${ecosystem} ecosystem)`, "sca");
+  // Sort by severity then cap
+  vulnsAll.sort((a, b) => severityRank(b.severity) - severityRank(a.severity));
+  const capped = vulnsAll.slice(0, 150);
+  await log(scanId, "info", `SCA total unique vulns: ${vulnsAll.length} (reporting ${capped.length})`, "sca");
+  try {
+    writeScanArtifact(scanId, "sca", JSON.stringify({ count: vulnsAll.length, vulns: capped }, null, 2));
+  } catch { /* ignore */ }
+  return scaVulnsToFindings(capped, ecosystem);
+}
 
-  // Try OSV-Scanner first, then Trivy
-  const scanners = [
-    { name: "osv-scanner", args: ["--json", `--lockfile=${manifestPath}`], parser: parseOsvOutput },
-    { name: "trivy", args: ["fs", "--format", "json", "--scanners", "vuln", "--", manifestPath], parser: parseTrivyOutput },
-  ];
+async function runScaScanners(
+  scanId: number,
+  target: { lockfile: string | null; dir: string | null }
+): Promise<ScaDependencyVuln[]> {
+  const { execSync } = await import("child_process");
+  const scanners: Array<{ name: string; args: string[]; parser: (s: string) => ScaDependencyVuln[] }> = [];
+  if (target.lockfile) {
+    scanners.push(
+      { name: "osv-scanner", args: ["--json", `--lockfile=${target.lockfile}`], parser: parseOsvOutput },
+      { name: "trivy", args: ["fs", "--format", "json", "--scanners", "vuln", "--", target.lockfile], parser: parseTrivyOutput },
+    );
+  }
+  if (target.dir) {
+    scanners.push(
+      { name: "osv-scanner", args: ["--json", "-r", target.dir], parser: parseOsvOutput },
+      { name: "trivy", args: ["fs", "--format", "json", "--scanners", "vuln", "--", target.dir], parser: parseTrivyOutput },
+    );
+  }
 
   for (const scanner of scanners) {
     try {
-      const { execSync } = await import("child_process");
-      try {
-        execSync(`which ${scanner.name}`, { stdio: "ignore", encoding: "utf8" });
-      } catch {
-        await log(scanId, "info", `${scanner.name} not found, trying next scanner...`, "sca");
+      try { execSync(`which ${scanner.name}`, { stdio: "ignore", encoding: "utf8" }); }
+      catch {
         continue;
       }
-
-      await log(scanId, "info", `Running ${scanner.name} on ${basename}...`, "sca");
+      await log(scanId, "info", `Running ${scanner.name} (${target.lockfile || target.dir})...`, "sca");
       const { stdout, stderr } = await runTool(scanner.name, scanner.args, {
-        timeout: 120000, maxBuffer: 4 * 1024 * 1024,
+        timeout: 180000,
+        maxBuffer: 8 * 1024 * 1024,
       });
-
       const output = stdout || stderr || "";
+      try { writeScanArtifact(scanId, scanner.name, output.slice(0, 2_000_000)); } catch { /* ignore */ }
       const vulns = scanner.parser(output);
       await log(scanId, "info", `${scanner.name} found ${vulns.length} vulnerable dependencies`, "sca");
-
-      if (vulns.length === 0) {
-        await log(scanId, "success", "SCA scan: PASS — no vulnerable dependencies found", "sca");
-        return [];
-      }
-
-      return scaVulnsToFindings(vulns, ecosystem);
+      if (vulns.length > 0) return vulns;
     } catch (err: any) {
       await log(scanId, "warn", `${scanner.name} error: ${err.message}`, "sca");
     }
   }
-
-  await log(scanId, "warn", "No SCA scanner available (install osv-scanner or trivy)", "sca");
-  return [{
-    category: "Tool Availability",
-    severity: "info",
-    title: "SCA scanner not available",
-    description: "Neither osv-scanner nor trivy is installed. Dependency vulnerability scanning was skipped.",
-    recommendation: "Install osv-scanner (npm i -g @google/osv-scanner) or trivy for SCA capability.",
-  }];
+  return [];
 }
 
 // ─── SAST (Static Application Security Testing) via Semgrep ──────────────────
 
-export async function testSAST(scanId: number, repoUrl: string, targetUrl: string): Promise<Finding[]> {
+export type RepoScanOpts = {
+  branch?: string | null;
+  ref?: string | null;
+  subpath?: string | null;
+  /** Reuse an existing clone (shared with SCA/secrets) */
+  existingClone?: { cloneDir: string; scanRoot: string };
+};
+
+export async function testSAST(
+  scanId: number,
+  repoUrl: string,
+  targetUrl: string,
+  opts?: RepoScanOpts
+): Promise<Finding[]> {
   const findings: Finding[] = [];
   const fs = await import("fs");
   const { execSync } = await import("child_process");
   const path = await import("path");
 
-  await log(scanId, "info", `SAST scan: cloning repository ${repoUrl}`, "sast");
+  await log(scanId, "info", `SAST scan: preparing repository ${repoUrl}`, "sast");
 
-  const cloneDir = `/tmp/sast-scan-${scanId}`;
+  let cloneDir = opts?.existingClone?.cloneDir;
+  let scanRoot = opts?.existingClone?.scanRoot;
+  let ownedClone = false;
+
   try {
-    if (fs.existsSync(cloneDir)) fs.rmSync(cloneDir, { recursive: true, force: true });
-
     let semgrepCmd = "semgrep";
     try {
       execSync("which semgrep", { stdio: "ignore" });
@@ -3628,21 +3707,27 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       return findings;
     }
 
-    const safeRepo = await assertSafeOutboundUrl(repoUrl, { protocols: ["https:"] });
-    const clone = await runTool(
-      "git",
-      ["-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "clone", "--depth", "1", "--single-branch", "--", safeRepo.href, cloneDir],
-      { timeout: 60000, env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "https" } }
-    );
-    if (clone.code !== 0) throw new Error(`git clone failed: ${clone.stderr.substring(0, 200)}`);
-    await log(scanId, "info", "Repository cloned successfully. Running Semgrep analysis...", "sast");
+    if (!cloneDir || !scanRoot) {
+      const cloned = await cloneGitRepo({
+        scanId,
+        repoUrl,
+        branch: opts?.branch,
+        ref: opts?.ref,
+        subpath: opts?.subpath,
+      });
+      cloneDir = cloned.cloneDir;
+      scanRoot = cloned.scanRoot;
+      ownedClone = true;
+    }
+    await log(scanId, "info", `Repository ready at ${scanRoot}. Running Semgrep...`, "sast");
 
+    const semgrepTimeout = Number(process.env.SAST_SEMGREP_TIMEOUT_MS || 600000);
     let output = "";
     try {
       const result = await runTool(
         semgrepCmd,
-        ["--config", "auto", "--json", "--severity", "WARNING", "--severity", "ERROR", "--timeout", "30", "--", cloneDir],
-        { timeout: 300000, maxBuffer: 16 * 1024 * 1024 }
+        buildSemgrepArgs(scanRoot),
+        { timeout: Number.isFinite(semgrepTimeout) ? semgrepTimeout : 600000, maxBuffer: 32 * 1024 * 1024 }
       );
       output = result.stdout;
     } catch (err: any) {
@@ -3657,6 +3742,8 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       return findings;
     }
 
+    try { writeScanArtifact(scanId, "semgrep", output.slice(0, 4_000_000)); } catch { /* ignore */ }
+
     let parsed: { results?: any[]; errors?: any[] };
     try {
       parsed = JSON.parse(output);
@@ -3665,8 +3752,16 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       return findings;
     }
 
-    const results = parsed.results ?? [];
-    await log(scanId, "info", `Semgrep found ${results.length} result(s). Processing...`, "sast");
+    const results = [...(parsed.results ?? [])];
+    results.sort((a, b) => {
+      const sa = severityRank(String(a.extra?.severity || ""));
+      const sb = severityRank(String(b.extra?.severity || ""));
+      if (sb !== sa) return sb - sa;
+      const ca = String(a.extra?.metadata?.confidence || "").toUpperCase() === "HIGH" ? 2 : 1;
+      const cb = String(b.extra?.metadata?.confidence || "").toUpperCase() === "HIGH" ? 2 : 1;
+      return cb - ca;
+    });
+    await log(scanId, "info", `Semgrep found ${results.length} result(s). Processing top by severity...`, "sast");
 
     const sevMap: Record<string, Finding["severity"]> = {
       ERROR: "high",
@@ -3674,9 +3769,10 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       INFO: "low",
     };
 
+    const maxFindings = Number(process.env.SAST_MAX_FINDINGS || 150);
     const seenSast = new Set<string>();
-    for (const r of results.slice(0, 200)) {
-      const filePath = (r.path as string).replace(cloneDir + "/", "");
+    for (const r of results.slice(0, Math.max(maxFindings * 2, 300))) {
+      const filePath = (r.path as string).replace(cloneDir + "/", "").replace(scanRoot + "/", "");
       const startLine = r.start?.line ?? 0;
       const endLine = r.end?.line ?? startLine;
       const extra = r.extra ?? {};
@@ -3690,7 +3786,7 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       const dedupeKey = `${checkId}|${filePath}|${startLine}`;
       if (seenSast.has(dedupeKey)) continue;
       seenSast.add(dedupeKey);
-      if (findings.length >= 100) break;
+      if (findings.length >= maxFindings) break;
 
       const cweList = metadata.cwe as string[] | undefined;
       let cweId: string | undefined;
@@ -3704,12 +3800,12 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
 
       let snippet = "";
       try {
-        const fileContent = fs.readFileSync(path.join(cloneDir, filePath), "utf8");
+        const fileContent = fs.readFileSync(path.join(cloneDir!, filePath), "utf8");
         const allLines = fileContent.split("\n");
         const contextStart = Math.max(0, startLine - 3);
         const contextEnd = Math.min(allLines.length, endLine + 2);
         snippet = allLines.slice(contextStart, contextEnd)
-          .map((line, i) => {
+          .map((line: string, i: number) => {
             const lineNum = contextStart + i + 1;
             const marker = (lineNum >= startLine && lineNum <= endLine) ? ">>>" : "   ";
             return `${marker} ${String(lineNum).padStart(4)} | ${line}`;
@@ -3720,22 +3816,22 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       const vulnClass = (metadata.vulnerability_class as string[] | undefined)?.join(", ") ?? "";
       const confidence = metadata.confidence ?? "";
       const ruleSource = metadata.source ?? "";
-
       const confTier = conf === "HIGH" ? "likely" as const : conf === "MEDIUM" ? "likely" as const : "heuristic" as const;
+      const isSecret = /secret|password|key|token|credential/i.test(checkId + " " + vulnClass);
       findings.push({
-        category: "SAST",
-        severity,
+        category: isSecret ? "Secrets" : "SAST",
+        severity: isSecret && severity === "medium" ? "high" : severity,
         confidence: confTier,
         templateId: checkId || undefined,
-        title: `[SAST] ${vulnClass || checkId.split(".").pop() || "Security Issue"} in ${filePath}:${startLine}`,
+        title: `[${isSecret ? "Secret" : "SAST"}] ${vulnClass || checkId.split(".").pop() || "Security Issue"} in ${filePath}:${startLine}`,
         description: message,
         evidence: `Rule: ${checkId}\nFile: ${filePath}\nLines: ${startLine}-${endLine}${confidence ? `\nConfidence: ${confidence}` : ""}${ruleSource ? `\nRule source: ${ruleSource}` : ""}`,
         recommendation: metadata.references?.length
           ? `Review and fix the identified issue. References: ${(metadata.references as string[]).slice(0, 3).join(", ")}`
           : "Review and fix the identified code pattern. Consult the Semgrep rule documentation for remediation guidance.",
-        cweId,
+        cweId: cweId || (isSecret ? "CWE-798" : undefined),
         owaspCategory,
-        affectedUrl: targetUrl,
+        affectedUrl: `${repoUrl.replace(/\.git$/, "")}/blob/HEAD/${filePath}#L${startLine}`,
         affectedComponent: `Source Code: ${filePath}`,
         sourceFile: filePath,
         sourceLine: startLine,
@@ -3743,20 +3839,20 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       });
     }
 
-    if (results.length > 100) {
-      await log(scanId, "info", `Semgrep produced ${results.length} results; showing top 100`, "sast");
+    if (results.length > maxFindings) {
+      await log(scanId, "info", `Semgrep produced ${results.length} results; showing top ${maxFindings} by severity`, "sast");
     }
     await log(scanId, "info", `SAST scan complete: ${findings.length} finding(s)`, "sast");
   } catch (err: any) {
     const msg = err.message?.substring(0, 300) ?? "Unknown error";
-    if (msg.includes("Repository not found") || msg.includes("Could not resolve") || msg.includes("fatal:")) {
+    if (msg.includes("Repository not found") || msg.includes("Could not resolve") || msg.includes("fatal:") || msg.includes("git clone failed")) {
       await log(scanId, "warn", `SAST: Failed to clone repository — ${msg}`, "sast");
       findings.push({
         category: "SAST",
         severity: "info",
         title: "SAST scan failed — repository not accessible",
-        description: `Could not clone repository: ${repoUrl}. Ensure the URL is correct and the repository is accessible (public or with configured credentials).`,
-        recommendation: "Verify the repository URL in the target settings. For private repositories, configure SSH keys or access tokens on the scanner.",
+        description: `Could not clone repository: ${repoUrl}. Ensure the URL is correct and the repository is accessible (set GITHUB_TOKEN for private repos).`,
+        recommendation: "Verify the repository URL. For private repositories, set GITHUB_TOKEN in the scanner environment.",
         affectedUrl: repoUrl,
         affectedComponent: "Repository Access",
       });
@@ -3764,12 +3860,97 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       await log(scanId, "warn", `SAST scan error: ${msg}`, "sast");
     }
   } finally {
-    try {
-      const fs2 = await import("fs");
-      if (fs2.existsSync(cloneDir)) fs2.rmSync(cloneDir, { recursive: true, force: true });
-    } catch { /* cleanup best-effort */ }
+    if (ownedClone && cloneDir) cleanupClone(cloneDir);
   }
 
+  return findings;
+}
+
+/** Secrets scan on an existing clone (Gitleaks if present, else Semgrep p/secrets) */
+async function testRepoSecrets(
+  scanId: number,
+  cloneDir: string,
+  scanRoot: string,
+  repoUrl: string
+): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  const { execSync } = await import("child_process");
+  await log(scanId, "info", "Repo secrets scan starting...", "secrets");
+
+  // Prefer gitleaks
+  try {
+    execSync("which gitleaks", { stdio: "ignore" });
+    try {
+      const result = await runTool(
+        "gitleaks",
+        ["detect", "--source", scanRoot, "--no-git", "-f", "json", "-r", `/tmp/gitleaks-${scanId}.json`],
+        { timeout: 180000, maxBuffer: 8 * 1024 * 1024 }
+      );
+      void result;
+      const { readFileSync, existsSync } = await import("fs");
+      const reportPath = `/tmp/gitleaks-${scanId}.json`;
+      if (existsSync(reportPath)) {
+        const raw = readFileSync(reportPath, "utf8");
+        try { writeScanArtifact(scanId, "gitleaks", raw.slice(0, 2_000_000)); } catch { /* ignore */ }
+        const rows = JSON.parse(raw || "[]") as Array<Record<string, unknown>>;
+        for (const row of (Array.isArray(rows) ? rows : []).slice(0, 50)) {
+          const file = String(row.File || row.file || "");
+          const line = Number(row.StartLine || row.line || 0);
+          const rule = String(row.RuleID || row.Description || "secret");
+          findings.push({
+            category: "Secrets",
+            severity: "high",
+            confidence: "confirmed",
+            templateId: rule,
+            title: `[Secret] ${rule} in ${file}${line ? `:${line}` : ""}`,
+            description: "Potential secret detected in repository source by Gitleaks.",
+            evidence: JSON.stringify({ rule, file, line, commit: row.Commit }).slice(0, 2000),
+            recommendation: "Rotate the credential and remove it from git history. Use a secrets manager.",
+            cweId: "CWE-798",
+            owaspCategory: "A07:2021 – Identification and Authentication Failures",
+            affectedUrl: `${repoUrl.replace(/\.git$/, "")}/blob/HEAD/${file}`,
+            affectedComponent: `Source Code: ${file}`,
+            sourceFile: file.replace(cloneDir.replace(/\/$/, "") + "/", ""),
+            sourceLine: line || undefined,
+          });
+        }
+      }
+    } catch (err: any) {
+      // gitleaks exits non-zero when secrets found — try reading report
+      try {
+        const { readFileSync, existsSync } = await import("fs");
+        const reportPath = `/tmp/gitleaks-${scanId}.json`;
+        if (existsSync(reportPath)) {
+          const rows = JSON.parse(readFileSync(reportPath, "utf8") || "[]") as Array<Record<string, unknown>>;
+          for (const row of (Array.isArray(rows) ? rows : []).slice(0, 50)) {
+            const file = String(row.File || "");
+            const line = Number(row.StartLine || 0);
+            const rule = String(row.RuleID || "secret");
+            findings.push({
+              category: "Secrets",
+              severity: "high",
+              confidence: "confirmed",
+              templateId: rule,
+              title: `[Secret] ${rule} in ${file}${line ? `:${line}` : ""}`,
+              description: "Potential secret detected in repository source by Gitleaks.",
+              evidence: JSON.stringify({ rule, file, line }).slice(0, 2000),
+              recommendation: "Rotate the credential and remove it from git history.",
+              cweId: "CWE-798",
+              affectedUrl: `${repoUrl.replace(/\.git$/, "")}/blob/HEAD/${file}`,
+              sourceFile: file,
+              sourceLine: line || undefined,
+            });
+          }
+        } else {
+          await log(scanId, "warn", `Gitleaks error: ${err.message?.substring(0, 200)}`, "secrets");
+        }
+      } catch { /* ignore */ }
+    }
+  } catch {
+    await log(scanId, "info", "Gitleaks not installed — Semgrep p/secrets already covered in SAST configs when enabled", "secrets");
+  }
+
+  await log(scanId, "info", `Repo secrets scan complete: ${findings.length} finding(s)`, "secrets");
   return findings;
 }
 
@@ -4394,6 +4575,7 @@ export async function runScan(
   loginCredentials?: LoginCredentials,
   repoUrl?: string,
   openapiUrl?: string,
+  repoOpts?: { branch?: string | null; ref?: string | null; subpath?: string | null },
 ): Promise<void> {
   await log(scanId, "info", `=== PenTest Portal Scan Started ===`, "init");
   await log(scanId, "info", `Target: ${targetUrl}`, "init");
@@ -4554,8 +4736,26 @@ export async function runScan(
   // Full mode: add extra tools (cors, traversal, config) and external tools (nikto, nuclei, zap)
   const toolsToRun = Array.from(new Set(toolList.map((t) => t.toLowerCase().trim())));
   if (scanMode === "full") {
-    for (const t of ["cors", "traversal", "config", "logic", "graphql", "ssrf", "tls", "auth-roles", "sca", "sast", "ai-prompt", "secret-leak", "url-norm", "http-client", "jwt", "cookie-flags", "smuggling", "crlf", "redirect", "proto-pollution", "nikto", "nuclei", "wapiti", "zap"]) {
+    for (const t of ["cors", "traversal", "config", "logic", "graphql", "ssrf", "tls", "auth-roles", "sca", "sast", "secrets", "ai-prompt", "secret-leak", "url-norm", "http-client", "jwt", "cookie-flags", "smuggling", "crlf", "redirect", "proto-pollution", "nikto", "nuclei", "wapiti", "zap"]) {
       if (!toolsToRun.includes(t)) toolsToRun.push(t);
+    }
+  }
+
+  // Shared repo clone for SAST / SCA / secrets when repoUrl is set
+  let sharedClone: { cloneDir: string; scanRoot: string } | null = null;
+  const needsRepo = toolsToRun.some((t) => ["sast", "sca", "secrets"].includes(t.toLowerCase())) && !!repoUrl;
+  if (needsRepo && repoUrl) {
+    try {
+      sharedClone = await cloneGitRepo({
+        scanId,
+        repoUrl,
+        branch: repoOpts?.branch,
+        ref: repoOpts?.ref,
+        subpath: repoOpts?.subpath,
+      });
+      await log(scanId, "info", `Shared repo clone ready (${sharedClone.scanRoot})`, "init");
+    } catch (err) {
+      await log(scanId, "warn", `Repo clone failed: ${(err as Error).message}`, "init");
     }
   }
 
@@ -4611,17 +4811,33 @@ export async function runScan(
           }
           break;
         case "sca":
-          if (manifestPath) {
-            toolFindings = await testSCA(scanId, manifestPath);
+          if (manifestPath || sharedClone) {
+            toolFindings = await testSCA(scanId, manifestPath, sharedClone
+              ? { cloneDir: sharedClone.cloneDir, scanRoot: sharedClone.scanRoot }
+              : undefined);
           } else {
-            await log(scanId, "info", "SCA scan skipped: no manifest path provided (use --deps flag)", "sca");
+            await log(scanId, "info", "SCA scan skipped: no manifest path or repo clone", "sca");
           }
           break;
         case "sast":
           if (repoUrl) {
-            toolFindings = await testSAST(scanId, repoUrl, targetUrl);
+            toolFindings = await testSAST(scanId, repoUrl, targetUrl, {
+              branch: repoOpts?.branch,
+              ref: repoOpts?.ref,
+              subpath: repoOpts?.subpath,
+              existingClone: sharedClone || undefined,
+            });
           } else {
             await log(scanId, "info", "SAST scan skipped: no repository URL configured on the target. Add a Git repository URL in Target settings to enable source code analysis.", "sast");
+          }
+          break;
+        case "secrets":
+          if (sharedClone && repoUrl) {
+            toolFindings = await testRepoSecrets(scanId, sharedClone.cloneDir, sharedClone.scanRoot, repoUrl);
+          } else if (repoUrl && !sharedClone) {
+            await log(scanId, "warn", "Secrets scan skipped — repo clone unavailable", "secrets");
+          } else {
+            await log(scanId, "info", "Secrets scan skipped — no repository URL", "secrets");
           }
           break;
         case "ai-prompt":
@@ -5314,6 +5530,8 @@ export async function runScan(
       await log(scanId, "success", `Trend: +${trendSummary.newFindings} new, -${trendSummary.resolvedFindings} resolved, ${trendSummary.persistingFindings} persisting`, "complete");
     }
 
+    if (sharedClone) cleanupClone(sharedClone.cloneDir);
+
     // Persist summary artifact + fire webhooks (best-effort)
     try {
       const { storeArtifact } = await import("./artifactStore");
@@ -5368,6 +5586,7 @@ export async function runScan(
       await log(scanId, "info", `Post-scan hooks skipped: ${(hookErr as Error).message}`, "complete");
     }
   } catch (err: any) {
+    if (typeof sharedClone !== "undefined" && sharedClone) cleanupClone(sharedClone.cloneDir);
     await log(scanId, "error", `Scan failed: ${err.message}`, "error");
     await updateScan(scanId, {
       status: "failed",

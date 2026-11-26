@@ -48,8 +48,9 @@ export function normalizeFindingKey(f: {
   affectedUrl?: string | null;
   templateId?: string | null;
   checkId?: string | null;
+  sourceFile?: string | null;
+  sourceLine?: number | null;
 }): string {
-  const url = normalizeAffectedUrl(f.affectedUrl);
   const id = (f.templateId || f.checkId || f.cweId || "").toLowerCase();
   const title = (f.title || "")
     .toLowerCase()
@@ -58,6 +59,12 @@ export function normalizeFindingKey(f: {
     .trim()
     .slice(0, 120);
   const cat = (f.category || "").toLowerCase();
+  const src = (f.sourceFile || "").toLowerCase().replace(/\\/g, "/");
+  const line = f.sourceLine != null ? String(f.sourceLine) : "";
+  // Prefer sourceFile:line for SAST / secrets / SCA-from-repo
+  if (src && id) return `${cat}|${id}|${src}:${line}`;
+  if (src) return `${cat}|${title}|${src}:${line}`;
+  const url = normalizeAffectedUrl(f.affectedUrl);
   if (id && url) return `${cat}|${id}|${url}`;
   if (f.cweId && url) return `cwe:${f.cweId.toLowerCase()}|${url}`;
   return `${cat}|${title}|${url}`;

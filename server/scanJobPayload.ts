@@ -9,6 +9,9 @@ export type ScanJobPayload = {
   manifestPath?: string | null;
   loginCredentials?: unknown;
   repoUrl?: string | null;
+  repoBranch?: string | null;
+  repoRef?: string | null;
+  repoSubpath?: string | null;
   openapiUrl?: string | null;
   /** When set, schedule runner may auto-push ticketing after completion */
   scheduleId?: number;
