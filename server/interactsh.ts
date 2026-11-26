@@ -126,25 +126,28 @@ export async function createInteractshSession(): Promise<OobSession | null> {
             extra?: unknown;
           } | null;
           if (!data?.data?.length) return false;
-          if (!probeId) return true;
-          // Decrypt is best-effort; also search ciphertext/plaintext strings for probe id
           const joined = data.data.join("\n");
-          if (joined.includes(probeId)) return true;
-          // Try decrypt AES payloads when aes_key present
-          if (data.aes_key) {
-            try {
-              const aesKeyRaw = privateDecrypt(
-                { key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
-                Buffer.from(data.aes_key, "base64")
-              );
-              // Presence of any decrypted traffic counts as hit for this correlation
-              void aesKeyRaw;
-              void createHash;
-              return true;
-            } catch {
-              return true; // got data array — treat as hit
+          // Prefer exact probe correlation when probeId provided
+          if (probeId) {
+            if (joined.includes(probeId)) return true;
+            // Try decrypt AES payloads and search for probe id only
+            if (data.aes_key) {
+              try {
+                const aesKeyRaw = privateDecrypt(
+                  { key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+                  Buffer.from(data.aes_key, "base64")
+                );
+                void aesKeyRaw;
+                void createHash;
+                // Without reliable AES-CFB decrypt of each blob, require probeId in ciphertext/metadata
+                return joined.toLowerCase().includes(probeId.toLowerCase());
+              } catch {
+                return joined.toLowerCase().includes(probeId.toLowerCase());
+              }
             }
+            return false;
           }
+          // No probeId: any interaction for this correlation counts
           return true;
         } catch {
           return false;

@@ -433,7 +433,7 @@ export default function ScanDetail() {
                               title="Waive across future scans / CI"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                waiveFinding.mutate({ findingId: f.id, reason: "Waived from scan detail" });
+                                waiveFinding.mutate({ findingId: f.id, title: f.title, category: f.category, cweId: f.cweId ?? undefined, reason: "Waived from scan detail" });
                               }}
                             >
                               Waive

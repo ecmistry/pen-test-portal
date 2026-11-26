@@ -40,13 +40,24 @@
 import https from "https";
 import http from "http";
 import { URL } from "url";
-import { appendScanLog, createFindings, updateScan, updateTarget, getPreviousCompletedScan, getFindingsByScan, getScanById, getFindingById, updateFindingStatus } from "./db";
+import { appendScanLog, createFindings, updateScan, updateTarget, getPreviousCompletedScan, getFindingsByScan, getScanById, getFindingById, updateFindingStatus, getActiveWaiverFingerprints } from "./db";
 import { assertHostAllowed, assertSafeOutboundUrl, runTool, safeLookup } from "./netSafety";
 
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 import { InsertScanFinding } from "../drizzle/schema";
 import { getPenTestCache } from "./penTestUpdater";
 import { enrichFinding } from "./findingEnrichment";
+import {
+  type FindingConfidence,
+  type ProbeTarget,
+  normalizeFindingKey,
+  preferFinding,
+  mergeEvidence,
+  mergeProbePaths,
+  graphqlPathsFromInventory,
+  confidenceScoreMultiplier,
+} from "./scanQuality";
+import { findingFingerprint } from "./findingFingerprint";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type ScanMode = "light" | "full";
@@ -87,6 +98,11 @@ interface Finding {
   authEndpoint?: string;
   /** Whether finding was discovered pre-auth or post-auth */
   authContext?: "pre-auth" | "post-auth";
+  /** Evidence strength for prioritization / FP reduction */
+  confidence?: FindingConfidence;
+  /** Nuclei template-id / ZAP pluginid / Semgrep check_id */
+  templateId?: string;
+  checkId?: string;
 }
 
 /** Auth metadata stored on the scan record */
@@ -233,21 +249,29 @@ export function profilePrivilegeRank(profile: AuthProfile): number {
   return 2; // default to standard user level
 }
 
-/** Deduplicate near-identical findings (same title+category+severity, or same CWE+URL). */
-export function dedupeFindings<T extends Pick<Finding, "title" | "category" | "severity" | "cweId" | "affectedUrl">>(
-  findings: T[]
-): T[] {
-  const seen = new Set<string>();
-  const out: T[] = [];
+/** Cross-tool dedupe using normalized URL + CWE/template/title correlation. */
+export function dedupeFindings<T extends Finding>(findings: T[]): T[] {
+  const byKey = new Map<string, T>();
   for (const f of findings) {
-    const keyA = `${f.category}|${f.severity}|${f.title}`.toLowerCase();
-    const keyB = `${f.cweId ?? ""}|${f.affectedUrl ?? ""}|${f.title}`.toLowerCase();
-    if (seen.has(keyA) || (f.cweId && f.affectedUrl && seen.has(keyB))) continue;
-    seen.add(keyA);
-    if (f.cweId && f.affectedUrl) seen.add(keyB);
-    out.push(f);
+    const key = normalizeFindingKey(f);
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, f);
+      continue;
+    }
+    const preferred = preferFinding(existing, f) as T;
+    preferred.evidence = mergeEvidence(existing.evidence, f.evidence);
+    if (!preferred.templateId && (f as Finding).templateId) preferred.templateId = (f as Finding).templateId;
+    if (!preferred.confidence || CONFIDENCE_FALLBACK(f) > CONFIDENCE_FALLBACK(preferred)) {
+      preferred.confidence = f.confidence ?? preferred.confidence;
+    }
+    byKey.set(key, preferred);
   }
-  return out;
+  return Array.from(byKey.values());
+}
+
+function CONFIDENCE_FALLBACK(f: { confidence?: FindingConfidence | null }): number {
+  return f.confidence === "confirmed" ? 3 : f.confidence === "heuristic" ? 1 : 2;
 }
 
 type LogLevel = "info" | "warn" | "error" | "success" | "debug";
@@ -801,7 +825,7 @@ const SQLI_PATHS_FULL = [
   "/login", "/api/auth/login", "/api/trpc/", "/graphql",
 ];
 
-async function testSQLInjection(scanId: number, targetUrl: string, scanMode: ScanMode, cookies?: string): Promise<Finding[]> {
+async function testSQLInjection(scanId: number, targetUrl: string, scanMode: ScanMode, cookies?: string, extraPaths?: ProbeTarget[] | string[]): Promise<Finding[]> {
   const findings: Finding[] = [];
   await log(scanId, "info", `Testing SQL injection vectors for ${targetUrl} (${scanMode} mode)`, "sqli");
 
@@ -815,10 +839,27 @@ async function testSQLInjection(scanId: number, targetUrl: string, scanMode: Sca
       await log(scanId, "debug", `Using ${extra.length} extra SQLi payloads from cache`, "sqli");
     }
   }
-  const testPaths = scanMode === "full" ? SQLI_PATHS_FULL : SQLI_PATHS_LIGHT;
+  const staticPaths = scanMode === "full" ? SQLI_PATHS_FULL : SQLI_PATHS_LIGHT;
+  const budget = scanMode === "full" ? 40 : 12;
+  const testPaths = mergeProbePaths(staticPaths, extraPaths, budget);
   const payloadLimit = scanMode === "full" ? payloads.length : 2;
+  await log(scanId, "info", `SQLi probing ${testPaths.length} path(s)`, "sqli");
 
   for (const path of testPaths) {
+    // Baseline benign request for comparison
+    let baselineBody = "";
+    let baselineHasSqlError = false;
+    try {
+      const basePath = path.includes("?") ? `${path}${encodeURIComponent("pentest_baseline")}` : path;
+      const baseResp = await httpGet(targetUrl, basePath, {
+        headers: { "X-Pentest-Scanner": "1" },
+        timeout: 10000,
+        cookies,
+      });
+      baselineBody = baseResp.body;
+      baselineHasSqlError = SQL_ERROR_PATTERNS.some((p) => p.test(baseResp.body));
+    } catch { /* continue without baseline */ }
+
     for (const payload of payloads.slice(0, payloadLimit)) {
       try {
         const url = path.includes("?") ? `${path}${encodeURIComponent(payload)}` : path;
@@ -829,12 +870,14 @@ async function testSQLInjection(scanId: number, targetUrl: string, scanMode: Sca
         });
 
         const isSqlError = SQL_ERROR_PATTERNS.some((p) => p.test(resp.body));
-        if (isSqlError) {
+        // Ignore if baseline already looks like SQL error (generic error pages)
+        if (isSqlError && !baselineHasSqlError) {
           const reqPath = path.includes("?") ? `${path}${encodeURIComponent(payload)}` : path;
           findings.push({
             category: "SQL Injection",
             severity: "critical",
             title: `SQL injection vulnerability detected at ${path}`,
+            confidence: "confirmed",
             description: "The application returned a SQL error message in response to an injection payload, indicating it may be vulnerable to SQL injection.",
             evidence: `Payload: ${payload}\nPath: ${path}\nResponse snippet: ${resp.body.substring(0, 300)}`,
             recommendation: "Use parameterised queries or prepared statements. Never interpolate user input into SQL strings. Implement input validation.",
@@ -862,47 +905,58 @@ async function testSQLInjection(scanId: number, targetUrl: string, scanMode: Sca
     }
   }
 
-  // Time-based blind SQLi (full mode only)
+  // Time-based blind SQLi (full mode only) — require delay vs benign baseline
   if (scanMode === "full") {
-    const timeBasedPaths = ["/?id=", "/api/users?id=", "/search?q="];
+    const timeBasedPaths = mergeProbePaths(["/?id=", "/api/users?id=", "/search?q="], extraPaths, 8);
     for (const path of timeBasedPaths) {
-      for (const payload of SQLI_TIME_BASED) {
-        try {
-          const start = Date.now();
-          const url = `${path}${encodeURIComponent(payload)}`;
-          await httpGet(targetUrl, url, { timeout: 8000, cookies });
-          const elapsed = Date.now() - start;
-          if (elapsed >= 2800) {
-            const tbPath = `${path}${encodeURIComponent(payload)}`;
-            findings.push({
-              category: "SQL Injection",
-              severity: "critical",
-              title: `Time-based blind SQL injection at ${path}`,
-              description: `Response delayed by ~${Math.round(elapsed / 1000)}s, indicating possible time-based SQL injection.`,
-              evidence: `Payload: ${payload}\nPath: ${path}\nDelay: ${elapsed}ms`,
-              recommendation: "Use parameterised queries. Time-based injection suggests blind SQLi is exploitable.",
-              cweId: "CWE-89",
-              owaspCategory: "A03:2021 – Injection",
-              poc: {
-                curlCommand: buildCurlCommand(targetUrl, tbPath),
-                requestRaw: buildRawRequest(targetUrl, tbPath),
-                responseSnippet: `Response delayed by ${elapsed}ms (expected ~3000ms for SLEEP payload)`,
-                reproductionSteps: [
-                  `1. Send: ${buildCurlCommand(targetUrl, tbPath)}`,
-                  `2. Measure response time — expected ~3 second delay`,
-                  "3. A delay confirms the SQL SLEEP/WAITFOR payload executed server-side",
-                ],
-              },
-              affectedUrl: `${targetUrl}${path}`,
-              affectedComponent: "SQL Query Handler",
-            });
-            await log(scanId, "error", `Time-based SQLi detected at ${path}`, "sqli");
-            break;
-          }
-        } catch {
-          // timeout or error — could indicate vulnerability
+      try {
+        const baseSamples: number[] = [];
+        for (let i = 0; i < 2; i++) {
+          const t0 = Date.now();
+          await httpGet(targetUrl, `${path}${encodeURIComponent("1")}`, { timeout: 8000, cookies }).catch(() => null);
+          baseSamples.push(Date.now() - t0);
         }
-      }
+        const baselineMs = baseSamples.reduce((a, b) => a + b, 0) / baseSamples.length;
+        for (const payload of SQLI_TIME_BASED) {
+          try {
+            const start = Date.now();
+            const url = `${path}${encodeURIComponent(payload)}`;
+            await httpGet(targetUrl, url, { timeout: 8000, cookies });
+            const elapsed = Date.now() - start;
+            // Require ~3s sleep AND at least 2s above baseline median
+            if (elapsed >= 2800 && elapsed - baselineMs >= 2000) {
+              const tbPath = `${path}${encodeURIComponent(payload)}`;
+              findings.push({
+                category: "SQL Injection",
+                severity: "critical",
+                confidence: "likely",
+                title: `Time-based blind SQL injection at ${path}`,
+                description: `Response delayed by ~${Math.round(elapsed / 1000)}s (baseline ~${Math.round(baselineMs)}ms), indicating possible time-based SQL injection.`,
+                evidence: `Payload: ${payload}\nPath: ${path}\nDelay: ${elapsed}ms\nBaseline: ${Math.round(baselineMs)}ms`,
+                recommendation: "Use parameterised queries. Time-based injection suggests blind SQLi is exploitable.",
+                cweId: "CWE-89",
+                owaspCategory: "A03:2021 – Injection",
+                poc: {
+                  curlCommand: buildCurlCommand(targetUrl, tbPath),
+                  requestRaw: buildRawRequest(targetUrl, tbPath),
+                  responseSnippet: `Response delayed by ${elapsed}ms (baseline ${Math.round(baselineMs)}ms)`,
+                  reproductionSteps: [
+                    `1. Send: ${buildCurlCommand(targetUrl, tbPath)}`,
+                    `2. Compare timing to a benign id=1 request (baseline ~${Math.round(baselineMs)}ms)`,
+                    "3. A ~3s excess delay confirms SLEEP/WAITFOR executed server-side",
+                  ],
+                },
+                affectedUrl: `${targetUrl}${path}`,
+                affectedComponent: "SQL Query Handler",
+              });
+              await log(scanId, "error", `Time-based SQLi detected at ${path}`, "sqli");
+              break;
+            }
+          } catch {
+            // timeout may indicate sleep; only flag if baseline was fast
+          }
+        }
+      } catch { /* path unreachable */ }
     }
   }
 
@@ -943,7 +997,7 @@ const XSS_PATHS_FULL = [
   "/api/users?filter=", "/api/items?sort=",
 ];
 
-async function testXSS(scanId: number, targetUrl: string, scanMode: ScanMode, cookies?: string): Promise<Finding[]> {
+async function testXSS(scanId: number, targetUrl: string, scanMode: ScanMode, cookies?: string, extraPaths?: ProbeTarget[] | string[]): Promise<Finding[]> {
   const findings: Finding[] = [];
   await log(scanId, "info", `Testing XSS vulnerabilities for ${targetUrl} (${scanMode} mode)`, "xss");
 
@@ -957,18 +1011,37 @@ async function testXSS(scanId: number, targetUrl: string, scanMode: ScanMode, co
       await log(scanId, "debug", `Using ${extra.length} extra XSS payloads from cache`, "xss");
     }
   }
-  const testPaths = scanMode === "full" ? XSS_PATHS_FULL : XSS_PATHS_LIGHT;
+  const staticPaths = scanMode === "full" ? XSS_PATHS_FULL : XSS_PATHS_LIGHT;
+  const testPaths = mergeProbePaths(staticPaths, extraPaths, scanMode === "full" ? 40 : 12);
   const payloadLimit = scanMode === "full" ? payloads.length : 2;
+  await log(scanId, "info", `XSS probing ${testPaths.length} path(s)`, "xss");
 
   for (const path of testPaths) {
+    let baselineReflects = false;
+    try {
+      const marker = "gs_xss_baseline_7f3a";
+      const base = await httpGet(targetUrl, `${path}${encodeURIComponent(marker)}`, { cookies });
+      baselineReflects = base.body.includes(marker);
+      const ct = (base.headers["content-type"] || "").toLowerCase();
+      // Skip non-HTML APIs for reflected XSS unless they clearly echo HTML
+      if (baselineReflects && ct.includes("application/json") && !base.body.includes("<")) {
+        // JSON reflection without HTML context → lower confidence later
+      }
+    } catch { /* ignore */ }
+
     for (const payload of payloads.slice(0, payloadLimit)) {
       try {
         const resp = await httpGet(targetUrl, `${path}${encodeURIComponent(payload)}`, { cookies });
-        if (resp.body.includes(payload) && !resp.body.includes(`&lt;script&gt;`)) {
+        const ct = (resp.headers["content-type"] || "").toLowerCase();
+        const reflected = resp.body.includes(payload);
+        const escaped = resp.body.includes("&lt;script&gt;") || resp.body.includes("&lt;img");
+        const htmlContext = ct.includes("text/html") || resp.body.includes("<html") || resp.body.includes("<!DOCTYPE");
+        if (reflected && !escaped && (htmlContext || payload.startsWith("javascript:"))) {
           const xssPath = `${path}${encodeURIComponent(payload)}`;
           findings.push({
             category: "Cross-Site Scripting",
             severity: "high",
+            confidence: htmlContext ? "confirmed" : "likely",
             title: `Reflected XSS vulnerability at ${path}`,
             description: "User-supplied input is reflected in the response without proper encoding, enabling cross-site scripting attacks.",
             evidence: `Payload: ${payload}\nPath: ${path}`,
@@ -1557,7 +1630,7 @@ export function getOobCallbackBase(): string | undefined {
 }
 
 /** Test for Server-Side Request Forgery (SSRF) vulnerabilities */
-export async function testSSRF(scanId: number, targetUrl: string, cookies?: string): Promise<Finding[]> {
+export async function testSSRF(scanId: number, targetUrl: string, cookies?: string, extraPaths?: ProbeTarget[] | string[]): Promise<Finding[]> {
   const findings: Finding[] = [];
   await log(scanId, "info", `Testing for SSRF vulnerabilities on ${targetUrl}`, "ssrf");
 
@@ -1584,6 +1657,7 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
           findings.push({
             category: "SSRF",
             severity: "critical",
+            confidence: "confirmed",
             title,
             description: `Out-of-band callback confirmed the server fetched an attacker-controlled URL via '${param}'.`,
             evidence: `GET ${path}\nOOB probe: ${probeId}\nCallback host: ${oob.host}\nPoll: hit=true`,
@@ -1619,21 +1693,32 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
         const path = `/?${param}=${encodeURIComponent(payload)}`;
         const resp = await httpGet(targetUrl, path, { timeout: 5000, cookies });
 
-        const suspicious =
-          resp.status === 200 && (
-            resp.body.includes("ami-") ||
-            resp.body.includes("instance-id") ||
-            resp.body.includes("computeMetadata") ||
-            resp.body.includes("127.0.0.1") ||
-            resp.body.includes("localhost") ||
-            (resp.body.length > 0 && resp.body !== baseResp.body && resp.body.length !== baseResp.body.length)
-          );
+        // Control: same param with benign external-looking value
+        const controlPath = `/?${param}=${encodeURIComponent("https://example.com/")}`;
+        const control = await httpGet(targetUrl, controlPath, { timeout: 5000, cookies }).catch(() => null);
+        const cloudMeta =
+          resp.body.includes("ami-") ||
+          resp.body.includes("instance-id") ||
+          resp.body.includes("computeMetadata") ||
+          /"accountId"|meta-data\/instance/i.test(resp.body);
+        const internalLeak =
+          (resp.body.includes("127.0.0.1") || resp.body.includes("localhost")) &&
+          !(control?.body.includes("127.0.0.1") || control?.body.includes("localhost"));
+        const bodyDiff =
+          !!control &&
+          resp.status === 200 &&
+          control.status === 200 &&
+          Math.abs(resp.body.length - control.body.length) > 200 &&
+          resp.body !== control.body &&
+          resp.body !== baseResp.body;
+        const suspicious = resp.status === 200 && (cloudMeta || internalLeak || bodyDiff);
 
         if (suspicious) {
           const title = `Potential SSRF via ${param} parameter (${name})`;
           findings.push({
             category: "SSRF",
-            severity: "high",
+            severity: cloudMeta ? "high" : "medium",
+            confidence: cloudMeta ? "likely" : "heuristic",
             title,
             description: `The parameter '${param}' accepted an internal URL (${name}) and returned a different response, suggesting the server may be fetching the provided URL.${oob ? "" : " (Heuristic only — configure Interactsh/OOB for confirmed detection.)"}`,
             evidence: `GET ${path} → ${resp.status} (${resp.body.length} bytes)\nResponse snippet: ${resp.body.substring(0, 300)}`,
@@ -1662,6 +1747,36 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
     }
   }
 
+  // Extra paths from OpenAPI/discovery (budgeted)
+  const invPaths = mergeProbePaths([], extraPaths, 10).filter((p) => p.includes("?") || p.includes("url") || p.includes("redirect"));
+  for (const inv of invPaths.slice(0, 6)) {
+    if (findings.some((f) => f.confidence === "confirmed")) break;
+    for (const { payload, name } of SSRF_PAYLOADS.slice(0, 2)) {
+      try {
+        const joiner = inv.includes("?") ? (inv.endsWith("=") || inv.endsWith("&") ? "" : "&url=") : "?url=";
+        const path = inv.endsWith("=") ? `${inv}${encodeURIComponent(payload)}` : `${inv}${joiner}${encodeURIComponent(payload)}`;
+        const resp = await httpGet(targetUrl, path, { timeout: 5000, cookies });
+        if (resp.body.includes("ami-") || resp.body.includes("computeMetadata")) {
+          findings.push({
+            category: "SSRF",
+            severity: "high",
+            confidence: "likely",
+            title: `Potential SSRF on inventory path (${name})`,
+            description: "Cloud metadata indicators observed when injecting an internal URL into a discovered endpoint.",
+            evidence: `GET ${path} → ${resp.status}
+${resp.body.substring(0, 300)}`,
+            recommendation: "Validate and sanitize URL parameters server-side. Block requests to internal/private IP ranges.",
+            cweId: "CWE-918",
+            owaspCategory: "A10:2021 – Server-Side Request Forgery",
+            affectedUrl: `${targetUrl}${path}`,
+            affectedComponent: "SSRF sink",
+          });
+          break;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
   if (findings.length === 0) {
     await log(scanId, "success", "SSRF checks: PASS — no SSRF indicators detected", "ssrf");
   }
@@ -1670,11 +1785,11 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
 }
 
 // ─── GraphQL Scanning ─────────────────────────────────────────────────────────
-async function testGraphQL(scanId: number, targetUrl: string, cookies?: string): Promise<Finding[]> {
+async function testGraphQL(scanId: number, targetUrl: string, cookies?: string, extraPaths?: ProbeTarget[] | string[]): Promise<Finding[]> {
   const findings: Finding[] = [];
   await log(scanId, "info", `Testing GraphQL endpoints for ${targetUrl}`, "graphql");
 
-  const graphqlPaths = ["/graphql", "/api/graphql", "/__graphql", "/gql", "/query", "/v1/graphql"];
+  const graphqlPaths = graphqlPathsFromInventory(extraPaths);
   let detectedPath: string | null = null;
 
   // Detect GraphQL endpoint
@@ -3295,16 +3410,23 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       INFO: "low",
     };
 
-    for (const r of results.slice(0, 100)) {
+    const seenSast = new Set<string>();
+    for (const r of results.slice(0, 200)) {
       const filePath = (r.path as string).replace(cloneDir + "/", "");
       const startLine = r.start?.line ?? 0;
       const endLine = r.end?.line ?? startLine;
       const extra = r.extra ?? {};
       const metadata = extra.metadata ?? {};
+      const conf = String(metadata.confidence || extra.metadata?.confidence || "").toUpperCase();
+      if (conf === "LOW") continue;
 
       const severity = sevMap[extra.severity] ?? "medium";
       const message = extra.message ?? r.check_id ?? "Unknown finding";
       const checkId = r.check_id ?? "";
+      const dedupeKey = `${checkId}|${filePath}|${startLine}`;
+      if (seenSast.has(dedupeKey)) continue;
+      seenSast.add(dedupeKey);
+      if (findings.length >= 100) break;
 
       const cweList = metadata.cwe as string[] | undefined;
       let cweId: string | undefined;
@@ -3335,9 +3457,12 @@ export async function testSAST(scanId: number, repoUrl: string, targetUrl: strin
       const confidence = metadata.confidence ?? "";
       const ruleSource = metadata.source ?? "";
 
+      const confTier = conf === "HIGH" ? "confirmed" as const : "likely" as const;
       findings.push({
         category: "SAST",
         severity,
+        confidence: confTier,
+        templateId: checkId || undefined,
         title: `[SAST] ${vulnClass || checkId.split(".").pop() || "Security Issue"} in ${filePath}:${startLine}`,
         description: message,
         evidence: `Rule: ${checkId}\nFile: ${filePath}\nLines: ${startLine}-${endLine}${confidence ? `\nConfidence: ${confidence}` : ""}${ruleSource ? `\nRule source: ${ruleSource}` : ""}`,
@@ -3501,7 +3626,7 @@ export async function testHorizontalEscalation(
     byRank.set(r, list);
   }
   let userProfiles: AuthProfile[] = [];
-  for (const [, list] of byRank) {
+  for (const [, list] of Array.from(byRank.entries())) {
     if (list.length >= 2) {
       userProfiles = list.slice(0, 2);
       break;
@@ -3708,14 +3833,143 @@ export async function testAuthenticatedAccess(
 }
 
 /** Exported for unit tests. */
-export function calculateScore(findings: Pick<Finding, "severity">[]): { score: number; riskLevel: "critical" | "high" | "medium" | "low" | "info" } {
+
+// ─── OpenAPI POST/JSON injection probes ───────────────────────────────────────
+async function testOpenApiBodyInjection(
+  scanId: number,
+  targetUrl: string,
+  cookies: string | undefined,
+  probes: ProbeTarget[] | undefined
+): Promise<Finding[]> {
+  const findings: Finding[] = [];
+  const postProbes = (probes || []).filter((p) => {
+    const m = (p.method || "GET").toUpperCase();
+    return m === "POST" || m === "PUT" || m === "PATCH";
+  }).slice(0, 12);
+  if (!postProbes.length) return findings;
+
+  await log(scanId, "info", `OpenAPI body injection: probing ${postProbes.length} write endpoint(s)`, "openapi-post");
+
+  const sqliPayloads = ["'", "1' OR '1'='1", "1; SELECT 1--"];
+  const xssPayloads = ['<script>alert(1)</script>', '"><img src=x onerror=alert(1)>'];
+
+  for (const probe of postProbes) {
+    const params = (probe.params?.length ? probe.params : ["q", "id", "name", "search"]).slice(0, 3);
+    const method = (probe.method || "POST").toUpperCase();
+
+    // Baseline empty/minimal JSON
+    let baselineBody = "";
+    let baselineStatus = 0;
+    try {
+      const baseObj: Record<string, string> = {};
+      for (const p of params) baseObj[p] = "pentest_baseline";
+      const baseRaw = JSON.stringify(baseObj);
+      const baseResp = await httpGet(targetUrl, probe.path, {
+        method,
+        body: baseRaw,
+        headers: { "Content-Type": "application/json", Accept: "application/json,text/html,*/*" },
+        timeout: 10000,
+        cookies,
+      });
+      baselineBody = baseResp.body;
+      baselineStatus = baseResp.status;
+    } catch { /* continue */ }
+
+    for (const param of params) {
+      for (const payload of sqliPayloads) {
+        try {
+          const bodyObj: Record<string, string> = {};
+          for (const p of params) bodyObj[p] = p === param ? payload : "pentest_ok";
+          const raw = JSON.stringify(bodyObj);
+          const resp = await httpGet(targetUrl, probe.path, {
+            method,
+            body: raw,
+            headers: { "Content-Type": "application/json", Accept: "application/json,text/html,*/*" },
+            timeout: 12000,
+            cookies,
+          });
+          const isSqlError = SQL_ERROR_PATTERNS.some((p) => p.test(resp.body));
+          const baseHas = SQL_ERROR_PATTERNS.some((p) => p.test(baselineBody));
+          if (isSqlError && !baseHas) {
+            findings.push({
+              category: "SQL Injection",
+              severity: "critical",
+              confidence: "confirmed",
+              title: `SQL injection via ${method} JSON body (${param})`,
+              description: `OpenAPI-derived ${method} ${probe.path} returned SQL error patterns when injecting into JSON field '${param}'.`,
+              evidence: `${method} ${probe.path}\nBody: ${raw}\nStatus: ${resp.status}\n${resp.body.substring(0, 500)}`,
+              recommendation: "Use parameterized queries / ORM bindings for all JSON body fields. Never concatenate user input into SQL.",
+              cweId: "CWE-89",
+              owaspCategory: "A03:2021 – Injection",
+              affectedUrl: `${targetUrl.replace(/\/$/, "")}${probe.path.startsWith("/") ? "" : "/"}${probe.path}`,
+              affectedComponent: "OpenAPI write endpoint",
+              templateId: `openapi-post-sqli:${probe.path}:${param}`,
+              poc: {
+                curlCommand: buildCurlCommand(targetUrl, probe.path, { method, body: raw, headers: { "Content-Type": "application/json" } }),
+                requestRaw: buildRawRequest(targetUrl, probe.path, { method, body: raw, headers: { "Content-Type": "application/json" } }),
+                responseSnippet: resp.body.substring(0, 400),
+                reproductionSteps: [`Send ${method} ${probe.path} with JSON field ${param}=${payload}`, "Observe SQL error in response"],
+              },
+            });
+            break;
+          }
+        } catch { /* ignore */ }
+      }
+
+      for (const payload of xssPayloads) {
+        try {
+          const bodyObj: Record<string, string> = {};
+          for (const p of params) bodyObj[p] = p === param ? payload : "pentest_ok";
+          const raw = JSON.stringify(bodyObj);
+          const resp = await httpGet(targetUrl, probe.path, {
+            method,
+            body: raw,
+            headers: { "Content-Type": "application/json", Accept: "text/html,application/json,*/*" },
+            timeout: 12000,
+            cookies,
+          });
+          const ct = (resp.headers["content-type"] || "").toLowerCase();
+          const reflected = resp.body.includes(payload);
+          const escaped = resp.body.includes("&lt;script") || resp.body.includes("&lt;img");
+          const htmlContext = ct.includes("text/html") || resp.body.includes("<html");
+          if (reflected && !escaped && htmlContext && !baselineBody.includes(payload)) {
+            findings.push({
+              category: "XSS",
+              severity: "high",
+              confidence: "confirmed",
+              title: `Reflected XSS via ${method} JSON body (${param})`,
+              description: `OpenAPI-derived ${method} ${probe.path} reflects unsanitized JSON field '${param}' into an HTML response.`,
+              evidence: `${method} ${probe.path}\nBody: ${raw}\nStatus: ${resp.status} CT: ${ct}\n${resp.body.substring(0, 500)}`,
+              recommendation: "Encode output for HTML context; set Content-Type appropriately; use a templating auto-escape layer.",
+              cweId: "CWE-79",
+              owaspCategory: "A03:2021 – Injection",
+              affectedUrl: `${targetUrl.replace(/\/$/, "")}${probe.path.startsWith("/") ? "" : "/"}${probe.path}`,
+              affectedComponent: "OpenAPI write endpoint",
+              templateId: `openapi-post-xss:${probe.path}:${param}`,
+            });
+            break;
+          }
+        } catch { /* ignore */ }
+      }
+    }
+  }
+
+  if (findings.length === 0) {
+    await log(scanId, "success", "OpenAPI body injection: no confirmed SQLi/XSS on write endpoints", "openapi-post");
+  } else {
+    await log(scanId, "warn", `OpenAPI body injection: ${findings.length} finding(s)`, "openapi-post");
+  }
+  return findings;
+}
+
+export function calculateScore(findings: Pick<Finding, "severity" | "confidence">[]): { score: number; riskLevel: "critical" | "high" | "medium" | "low" | "info" } {
   const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
   let deductions = 0;
   for (const f of findings) {
     const cap = SCORE_CAP[f.severity];
     if (counts[f.severity] >= cap.maxCount) continue;
     counts[f.severity]++;
-    deductions += cap.deduction;
+    deductions += cap.deduction * confidenceScoreMultiplier(f.confidence);
   }
   const score = Math.round(Math.max(0, Math.min(100, 100 - deductions)));
   let riskLevel: "critical" | "high" | "medium" | "low" | "info" = "info";
@@ -3740,19 +3994,21 @@ export interface TrendSummary {
 }
 
 export function computeTrend(
-  currentFindings: Pick<Finding, "title" | "category" | "severity">[],
-  previousFindings: { title: string; category: string; severity: string }[],
+  currentFindings: Pick<Finding, "title" | "category" | "severity" | "cweId" | "affectedUrl">[],
+  previousFindings: { title: string; category: string; severity: string; cweId?: string | null; affectedUrl?: string | null }[],
   previousScan: { id: number; completedAt: Date | null; authMode?: string | null }
 ): TrendSummary {
-  const prevSet = new Set(previousFindings.map((f) => `${f.category}::${f.title}`));
-  const currSet = new Set(currentFindings.map((f) => `${f.category}::${f.title}`));
+  const keyOf = (f: { title: string; category: string; cweId?: string | null; affectedUrl?: string | null }) =>
+    findingFingerprint({ title: f.title, category: f.category, cweId: f.cweId }) + "::" + (f.affectedUrl || "").split("?")[0].toLowerCase();
+  const prevSet = new Set(previousFindings.map((f) => keyOf(f)));
+  const currSet = new Set(currentFindings.map((f) => keyOf(f)));
 
   const newItems: string[] = [];
   const persistingItems: string[] = [];
   const resolvedItems: string[] = [];
 
   for (const f of currentFindings) {
-    const key = `${f.category}::${f.title}`;
+    const key = keyOf(f);
     if (prevSet.has(key)) {
       if (!persistingItems.includes(f.title)) persistingItems.push(f.title);
     } else {
@@ -3761,7 +4017,7 @@ export function computeTrend(
   }
 
   for (const f of previousFindings) {
-    const key = `${f.category}::${f.title}`;
+    const key = keyOf(f);
     if (!currSet.has(key)) {
       if (!resolvedItems.includes(f.title)) resolvedItems.push(f.title);
     }
@@ -3813,7 +4069,7 @@ export async function discoverSiteRoutes(
   if (home && home.status < 400) {
     routes.push(...parseHtmlLinks(home.body, origin));
     // Fetch a few linked JS bundles for route hints
-    const scriptSrcs = [...home.body.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]).slice(0, 5);
+    const scriptSrcs = Array.from(home.body.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)).map((m) => m[1]).slice(0, 5);
     for (const src of scriptSrcs) {
       try {
         const abs = new URL(src, origin);
@@ -3873,7 +4129,8 @@ export async function runScan(
   let endpointsTested = 0;
 
   // Load OpenAPI inventory when configured; otherwise discover routes from robots/sitemap/HTML/JS
-  let apiInventory: { adminEndpoints?: string[]; resourcePatterns?: string[]; coverageNote?: string } | undefined;
+  let apiInventory: { adminEndpoints?: string[]; resourcePatterns?: string[]; coverageNote?: string; probeTargets?: ProbeTarget[] } | undefined;
+  let probeTargets: ProbeTarget[] = [];
   if (openapiUrl) {
     try {
       const { fetchOpenApiInventory } = await import("./openapiInventory");
@@ -3883,7 +4140,9 @@ export async function runScan(
           adminEndpoints: inv.adminEndpoints,
           resourcePatterns: inv.resourcePatterns,
           coverageNote: `API inventory from ${inv.source}: ${inv.endpoints.length} operations, ${inv.adminEndpoints.length} admin-like, ${inv.resourcePatterns.length} resource patterns`,
+          probeTargets: inv.probeTargets,
         };
+        probeTargets = (inv.probeTargets || []).map((p) => ({ ...p, source: "openapi" as const }));
         await log(scanId, "info", apiInventory.coverageNote!, "init");
         allFindings.push({
           category: "API Inventory",
@@ -3940,8 +4199,9 @@ export async function runScan(
         apiInventory = {
           adminEndpoints: discovered.adminEndpoints,
           resourcePatterns: discovered.resourcePatterns,
-          coverageNote: `Discovery crawl found ${discovered.allPaths.length} routes (${discovered.adminEndpoints.length} admin-like, ${discovered.resourcePatterns.length} resource patterns)`,
+          coverageNote: `Discovery inventory: ${discovered.allPaths.length} routes (${discovered.adminEndpoints.length} admin-like, ${discovered.resourcePatterns.length} resource patterns)`,
         };
+        probeTargets = discovered.allPaths.slice(0, 60).map((p) => ({ path: p, method: "GET", source: "discovery" as const }));
         await log(scanId, "info", apiInventory.coverageNote!, "init");
         allFindings.push({
           category: "Discovery",
@@ -3982,10 +4242,10 @@ export async function runScan(
           toolFindings = await testAuthentication(scanId, targetUrl, scanMode, sessionCookies);
           break;
         case "sqli":
-          toolFindings = await testSQLInjection(scanId, targetUrl, scanMode, sessionCookies);
+          toolFindings = await testSQLInjection(scanId, targetUrl, scanMode, sessionCookies, probeTargets);
           break;
         case "xss":
-          toolFindings = await testXSS(scanId, targetUrl, scanMode, sessionCookies);
+          toolFindings = await testXSS(scanId, targetUrl, scanMode, sessionCookies, probeTargets);
           break;
         case "recon":
           toolFindings = await testIntelligenceGathering(scanId, targetUrl, scanMode, sessionCookies);
@@ -4003,10 +4263,10 @@ export async function runScan(
           toolFindings = await testBusinessLogic(scanId, targetUrl, sessionCookies);
           break;
         case "graphql":
-          toolFindings = await testGraphQL(scanId, targetUrl, sessionCookies);
+          toolFindings = await testGraphQL(scanId, targetUrl, sessionCookies, probeTargets);
           break;
         case "ssrf":
-          toolFindings = await testSSRF(scanId, targetUrl, sessionCookies);
+          toolFindings = await testSSRF(scanId, targetUrl, sessionCookies, probeTargets);
           break;
         case "tls":
           toolFindings = await testSSLTLS(scanId, targetUrl, sessionCookies);
@@ -4201,37 +4461,72 @@ export async function runScan(
             await log(scanId, "info", "Nuclei found — running template scan (up to 5 minutes; low/medium/high/critical + CVE/misconfig tags)...", "nuclei");
             let output = "";
             const nucleiSeverity = scanMode === "full" ? "low,medium,high,critical" : "medium,high,critical";
-            const nucleiArgs = ["-u", targetUrl, "-severity", nucleiSeverity, "-silent"];
+            const nucleiArgs = ["-u", targetUrl, "-severity", nucleiSeverity, "-jsonl", "-silent"];
             if (scanMode === "full") nucleiArgs.push("-tags", "cve,misconfig,exposure,takeover");
+            if (sessionCookies) nucleiArgs.push("-H", `Cookie: ${sessionCookies}`);
             try {
               const result = await runTool(nucleiCmd, nucleiArgs, {
                 timeout: 300000,
                 maxBuffer: 4 * 1024 * 1024,
               });
-              output = result.output;
+              output = (result as any).output || result.stdout || "";
             } catch (runErr: unknown) {
-              const e = runErr as { stdout?: string; stderr?: string; message?: string };
-              output = e?.stdout ?? e?.stderr ?? "";
+              const e = runErr as { stdout?: string; stderr?: string; output?: string; message?: string };
+              output = e?.output ?? e?.stdout ?? e?.stderr ?? "";
               if (output) {
                 await log(scanId, "info", "Nuclei completed (some scanners exit non-zero when findings are present; output above was captured).", "nuclei");
               }
             }
             if (output) {
               const lines = output.split("\n").filter((l) => l.trim());
-              for (const line of lines.slice(0, 30)) {
-                const severityMatch = line.match(/\[(critical|high|medium|low|info)\]/i);
-                const sev = (severityMatch?.[1]?.toLowerCase() as Finding["severity"]) || "medium";
-                toolFindings.push({
-                  category: "Nuclei",
-                  severity: sev,
-                  title: line.substring(0, 200),
-                  description: line,
-                  recommendation: "Review and remediate the identified vulnerability.",
-                  affectedUrl: targetUrl,
-                  affectedComponent: "Vulnerability Template (Nuclei)",
-                });
+              let parsedCount = 0;
+              for (const line of lines.slice(0, 80)) {
+                try {
+                  const row = JSON.parse(line);
+                  const info = row.info || {};
+                  const sevRaw = String(info.severity || row.severity || "medium").toLowerCase();
+                  const sev = (["critical","high","medium","low","info"].includes(sevRaw) ? sevRaw : "medium") as Finding["severity"];
+                  const templateId = row["template-id"] || row.templateID || row.template || info.name;
+                  const matched = row["matched-at"] || row.matched || row.host || targetUrl;
+                  const name = info.name || templateId || "Nuclei finding";
+                  const classification = info.classification || {};
+                  const cweList = classification["cwe-id"];
+                  const cwe = Array.isArray(cweList) ? cweList[0] : undefined;
+                  toolFindings.push({
+                    category: "Nuclei",
+                    severity: sev,
+                    confidence: "likely",
+                    title: String(name).slice(0, 200),
+                    description: info.description || String(name),
+                    evidence: JSON.stringify({
+                      templateId,
+                      matched,
+                      extractor: row.extractor || row["extracted-results"],
+                      curl: row["curl-command"],
+                    }).slice(0, 4000),
+                    recommendation: (Array.isArray(info.remediation) ? info.remediation.join(" ") : info.remediation) || "Review and remediate the identified vulnerability.",
+                    cweId: typeof cwe === "string" ? cwe : undefined,
+                    affectedUrl: String(matched),
+                    affectedComponent: "Vulnerability Template (Nuclei)",
+                    templateId: templateId ? String(templateId) : undefined,
+                  });
+                  parsedCount++;
+                } catch {
+                  const severityMatch = line.match(/\[(critical|high|medium|low|info)\]/i);
+                  const sev = (severityMatch?.[1]?.toLowerCase() as Finding["severity"]) || "medium";
+                  toolFindings.push({
+                    category: "Nuclei",
+                    severity: sev,
+                    confidence: "heuristic",
+                    title: line.substring(0, 200),
+                    description: line,
+                    recommendation: "Review and remediate the identified vulnerability.",
+                    affectedUrl: targetUrl,
+                    affectedComponent: "Vulnerability Template (Nuclei)",
+                  });
+                }
               }
-              await log(scanId, "info", `Nuclei found ${toolFindings.length} findings`, "nuclei");
+              await log(scanId, "info", `Nuclei found ${toolFindings.length} findings (${parsedCount} structured)`, "nuclei");
             }
           } catch {
             if (!nucleiAvailable) {
@@ -4275,7 +4570,9 @@ export async function runScan(
           const wapitiOut = `/tmp/wapiti-${scanId}.json`;
           try {
             await log(scanId, "info", "Wapiti found — running crawl + modules (up to 5 minutes)...", "wapiti");
-            await runTool(wapitiCmd, ["-u", targetUrl, "-f", "json", "-o", wapitiOut, "-v", "0", "--scope", "domain"], {
+            const wapitiArgs = ["-u", targetUrl, "-f", "json", "-o", wapitiOut, "-v", "0", "--scope", "domain"];
+            if (sessionCookies) wapitiArgs.push("--cookie", sessionCookies);
+            await runTool(wapitiCmd, wapitiArgs, {
               timeout: 300000,
               maxBuffer: 8 * 1024 * 1024,
             });
@@ -4287,14 +4584,20 @@ export async function runScan(
                 if (!Array.isArray(items)) continue;
                 for (const v of items.slice(0, 10)) {
                   const severity = (v.severity === 3 ? "high" : v.severity === 2 ? "medium" : "low") as Finding["severity"];
+                  const anyV = v as Record<string, unknown>;
+                  const pathInfo = String(anyV.path || anyV.url || anyV.curl_command || "");
+                  const method = String(anyV.method || "GET");
                   toolFindings.push({
                     category: "Wapiti",
                     severity,
+                    confidence: "likely",
                     title: (v.name ?? v.title ?? name) as string,
                     description: (v.desc ?? v.name ?? name) as string,
+                    evidence: JSON.stringify({ method, path: pathInfo, info: anyV.info || anyV.http_request || null }).slice(0, 4000),
                     recommendation: "Review and remediate the reported issue.",
-                    affectedUrl: targetUrl,
+                    affectedUrl: pathInfo.startsWith("http") ? pathInfo : (pathInfo ? `${targetUrl.replace(/\/$/, "")}${pathInfo.startsWith("/") ? "" : "/"}${pathInfo}` : targetUrl),
                     affectedComponent: "Application Scanner (Wapiti)",
+                    templateId: String(name),
                   });
                 }
               }
@@ -4321,7 +4624,18 @@ export async function runScan(
 
             const zapOutFile = `/tmp/zap-report-${scanId}.json`;
             await log(scanId, "info", "ZAP found — running quick scan (up to 5 minutes)...", "zap");
-            const { output: consoleOutput } = await runTool("zap.sh", ["-cmd", "-quickurl", targetUrl, "-quickout", zapOutFile, "-quickprogress"], {
+            const zapArgs = ["-cmd", "-quickurl", targetUrl, "-quickout", zapOutFile, "-quickprogress"];
+            if (sessionCookies) {
+              zapArgs.push(
+                "-config", "replacer.full_list(0).description=ghoststrike-cookie",
+                "-config", "replacer.full_list(0).enabled=true",
+                "-config", "replacer.full_list(0).matchtype=REQ_HEADER",
+                "-config", "replacer.full_list(0).matchstr=Cookie",
+                "-config", `replacer.full_list(0).replacement=${sessionCookies}`,
+                "-config", "replacer.full_list(0).initiators="
+              );
+            }
+            const { output: consoleOutput } = await runTool("zap.sh", zapArgs, {
               timeout: 300000,
               maxBuffer: 4 * 1024 * 1024,
             });
@@ -4339,13 +4653,17 @@ export async function runScan(
                   const solution = String(alert.solution || "").replace(/<[^>]*>/g, "").trim();
                   const instances = Array.isArray(alert.instances) ? alert.instances : [];
                   const firstUri = instances.length > 0 ? String((instances[0] as Record<string,unknown>).uri || "") : "";
+                  const uris = instances.slice(0, 5).map((inst) => String((inst as Record<string,unknown>).uri || "")).filter(Boolean);
                   const cweId = alert.cweid ? `CWE-${alert.cweid}` : undefined;
+                  const pluginId = alert.pluginid ? String(alert.pluginid) : undefined;
                   toolFindings.push({
                     category: "OWASP ZAP",
                     severity,
+                    confidence: severity === "info" ? "heuristic" : "likely",
+                    templateId: pluginId,
                     title: `[ZAP] ${String(alert.name || alert.alert || "Unknown alert")}`,
                     description: desc.substring(0, 1500),
-                    evidence: `Affected: ${instances.length} instance(s)${firstUri ? ` — e.g. ${firstUri}` : ""}`,
+                    evidence: `Affected: ${instances.length} instance(s)${uris.length ? ` — ${uris.join(", ")}` : (firstUri ? ` — e.g. ${firstUri}` : "")}${pluginId ? `\npluginId=${pluginId}` : ""}`,
                     recommendation: solution.substring(0, 1000),
                     cweId,
                     affectedUrl: firstUri || targetUrl,
@@ -4396,6 +4714,14 @@ export async function runScan(
       await log(scanId, "info", `${tool.toUpperCase()} complete: ${toolFindings.length} finding(s)`, tool);
     }
 
+    // OpenAPI POST/PUT/PATCH JSON injection (inventory-driven)
+    try {
+      const postFindings = await testOpenApiBodyInjection(scanId, targetUrl, sessionCookies, probeTargets);
+      allFindings.push(...postFindings);
+    } catch (postErr: unknown) {
+      await log(scanId, "warn", `OpenAPI body injection skipped: ${(postErr as Error).message}`, "openapi-post");
+    }
+
     // Deduplicate near-identical findings across tools before scoring/persistence
     const beforeDedupe = allFindings.length;
     const uniqueFindings = dedupeFindings(allFindings);
@@ -4405,12 +4731,32 @@ export async function runScan(
       await log(scanId, "info", `Deduplicated findings: ${beforeDedupe} → ${allFindings.length}`, "init");
     }
 
-    // Calculate score
-    const { score, riskLevel } = calculateScore(allFindings);
+    // Apply org waivers: exclude from score/trend; persist as false_positive
+    const waivedFingerprints = new Set<string>();
+    try {
+      const scanRow = await getScanById(scanId);
+      const orgId = scanRow?.orgId;
+      if (orgId) {
+        const fps = await getActiveWaiverFingerprints(orgId);
+        for (const f of allFindings) {
+          const fp = findingFingerprint(f);
+          if (fps.has(fp)) waivedFingerprints.add(fp);
+        }
+        if (waivedFingerprints.size) {
+          await log(scanId, "info", `Applied ${waivedFingerprints.size} waived fingerprint(s) — excluded from score`, "waiver");
+        }
+      }
+    } catch (wErr: unknown) {
+      await log(scanId, "warn", `Waiver lookup skipped: ${(wErr as Error).message}`, "waiver");
+    }
+    const scoreFindings = allFindings.filter((f) => !waivedFingerprints.has(findingFingerprint(f)));
 
-    // Count by severity
+    // Calculate score
+    const { score, riskLevel } = calculateScore(scoreFindings);
+
+    // Count by severity (non-waived only — matches score)
     const counts = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
-    for (const f of allFindings) counts[f.severity]++;
+    for (const f of scoreFindings) counts[f.severity]++;
 
     // Tag findings with auth context
     if (isAuthenticated) {
@@ -4448,6 +4794,7 @@ export async function runScan(
 
         const poc = f.poc ?? null;
 
+        const waived = waivedFingerprints.has(findingFingerprint(f));
         return {
           scanId,
           category: f.category,
@@ -4458,6 +4805,8 @@ export async function runScan(
           recommendation: f.recommendation,
           cweId: f.cweId,
           owaspCategory: f.owaspCategory,
+          confidence: f.confidence ?? null,
+          templateId: f.templateId ?? null,
           cvssVector: enriched.cvssVector,
           cvssScore: enriched.cvssScore != null ? String(enriched.cvssScore) : null,
           remediationComplexity: enriched.remediationComplexity,
@@ -4472,7 +4821,7 @@ export async function runScan(
           sourceLine: f.sourceLine ?? null,
           sourceSnippet: f.sourceSnippet ?? null,
           authContext: f.authContext ?? null,
-          status: "open",
+          status: waived ? "false_positive" : "open",
         };
       });
       await createFindings(dbFindings);
@@ -4493,7 +4842,7 @@ export async function runScan(
       const prevScan = await getPreviousCompletedScan(targetId, scanId);
       if (prevScan) {
         const prevFindings = await getFindingsByScan(prevScan.id);
-        trendSummary = computeTrend(allFindings, prevFindings, prevScan);
+        trendSummary = computeTrend(scoreFindings, prevFindings, prevScan);
         await log(scanId, "info", `Trend vs scan #${prevScan.id} (${prevScan.completedAt?.toISOString().slice(0, 10) ?? "unknown"}): ${trendSummary.newFindings} new, ${trendSummary.resolvedFindings} resolved, ${trendSummary.persistingFindings} persisting`, "trend");
       }
     } catch (trendErr: any) {
@@ -4506,7 +4855,7 @@ export async function runScan(
       completedAt: new Date(),
       securityScore: score,
       riskLevel,
-      totalFindings: allFindings.length,
+      totalFindings: scoreFindings.length,
       criticalCount: counts.critical,
       highCount: counts.high,
       mediumCount: counts.medium,

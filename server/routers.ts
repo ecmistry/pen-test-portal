@@ -324,6 +324,8 @@ function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFindin
       sourceLine: null,
       sourceSnippet: null,
       authContext: null,
+      confidence: null,
+      templateId: null,
       status: "open" as const,
       createdAt: new Date(),
     };

@@ -39,19 +39,19 @@ export function renderPrometheus(): string {
   lines.push("# TYPE ghoststrike_info gauge");
   lines.push('ghoststrike_info{version="1.0.0"} 1');
 
-  for (const [k, v] of counters) {
+  for (const [k, v] of Array.from(counters.entries())) {
     const name = k.includes("{") ? k.slice(0, k.indexOf("{")) : k;
     lines.push(`# TYPE ${name} counter`);
     lines.push(`${k} ${v}`);
   }
-  for (const [k, v] of gauges) {
+  for (const [k, v] of Array.from(gauges.entries())) {
     const name = k.includes("{") ? k.slice(0, k.indexOf("{")) : k;
     lines.push(`# TYPE ${name} gauge`);
     lines.push(`${k} ${v}`);
   }
-  for (const [k, samples] of histograms) {
+  for (const [k, samples] of Array.from(histograms.entries())) {
     const name = k.includes("{") ? k.slice(0, k.indexOf("{")) : k;
-    const sum = samples.reduce((a, b) => a + b, 0);
+    const sum = samples.reduce((a: number, b: number) => a + b, 0);
     const count = samples.length;
     lines.push(`# TYPE ${name} summary`);
     const labels = k.includes("{") ? k.slice(k.indexOf("{")) : "";

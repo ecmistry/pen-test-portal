@@ -122,6 +122,8 @@ async function applyLightMigrations(db: ReturnType<typeof drizzle>) {
   await safeAlter("ALTER TABLE users ADD COLUMN orgRole ENUM('org_admin','member','viewer','auditor') DEFAULT 'member'");
   await safeAlter("ALTER TABLE targets ADD COLUMN environment VARCHAR(64) DEFAULT 'production'");
   await safeAlter("ALTER TABLE targets ADD COLUMN policyId INT DEFAULT NULL");
+  await safeAlter("ALTER TABLE scan_findings ADD COLUMN confidence VARCHAR(20) DEFAULT NULL");
+  await safeAlter("ALTER TABLE scan_findings ADD COLUMN templateId VARCHAR(255) DEFAULT NULL");
   try {
     await db.execute(sql.raw(`
       CREATE TABLE IF NOT EXISTS scan_policies (

@@ -131,6 +131,10 @@ export const scanFindings = mysqlTable("scan_findings", {
   sourceLine: int("sourceLine"),
   sourceSnippet: text("sourceSnippet"),
   authContext: varchar("authContext", { length: 20 }),
+  /** confirmed | likely | heuristic — exploitability / evidence strength */
+  confidence: varchar("confidence", { length: 20 }),
+  /** External scanner rule/template id (Nuclei template-id, ZAP pluginid, Semgrep check_id) */
+  templateId: varchar("templateId", { length: 255 }),
   status: mysqlEnum("status", ["open", "acknowledged", "resolved", "false_positive"]).default("open").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
 });

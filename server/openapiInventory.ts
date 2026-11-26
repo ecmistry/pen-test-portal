@@ -11,6 +11,10 @@ export interface ApiEndpoint {
   pathTemplate: string;
   hasPathId: boolean;
   isAdminLikely: boolean;
+  /** Query / path / header param names suitable for injection probes */
+  injectParams?: string[];
+  /** True when operation declares a JSON request body */
+  hasJsonBody?: boolean;
 }
 
 export interface ApiInventory {
@@ -18,6 +22,14 @@ export interface ApiInventory {
   endpoints: ApiEndpoint[];
   adminEndpoints: string[];
   resourcePatterns: string[];
+  /** Probe-ready targets for SQLi/XSS/SSRF/POST injection */
+  probeTargets?: Array<{
+    path: string;
+    method: string;
+    params: string[];
+    hasJsonBody?: boolean;
+    source: "openapi";
+  }>;
 }
 
 function isAdminPath(path: string, tags?: string[]): boolean {
@@ -50,6 +62,23 @@ export function parseOpenApiDocument(doc: unknown, source = "openapi"): ApiInven
       const tags = Array.isArray(operation.tags) ? (operation.tags as string[]) : undefined;
       const pathTemplate = normalizePathTemplate(rawPath);
       const hasPathId = /\{id\}/.test(pathTemplate) || /\{[^}]+\}/.test(rawPath);
+      const injectParams: string[] = [];
+      const params = Array.isArray(operation.parameters) ? (operation.parameters as any[]) : [];
+      for (const p of params) {
+        const name = p?.name || p?.$ref;
+        const inWhere = p?.in;
+        if (typeof name === "string" && (inWhere === "query" || inWhere === "path")) {
+          injectParams.push(name);
+        }
+      }
+      const rb = operation.requestBody as any;
+      const hasJsonBody = !!(
+        rb?.content?.["application/json"] ||
+        rb?.content?.["application/x-www-form-urlencoded"]
+      );
+      if (hasJsonBody && injectParams.length === 0) {
+        injectParams.push("q", "id", "search", "url");
+      }
       endpoints.push({
         method: method.toUpperCase(),
         path: rawPath,
@@ -58,6 +87,8 @@ export function parseOpenApiDocument(doc: unknown, source = "openapi"): ApiInven
         tags,
         hasPathId,
         isAdminLikely: isAdminPath(rawPath, tags),
+        injectParams: injectParams.slice(0, 8),
+        hasJsonBody,
       });
     }
   }
@@ -74,7 +105,18 @@ export function parseOpenApiDocument(doc: unknown, source = "openapi"): ApiInven
     new Set(endpoints.filter((e) => e.hasPathId && e.method === "GET").map((e) => e.pathTemplate))
   ).slice(0, 40);
 
-  return { source, endpoints, adminEndpoints, resourcePatterns };
+  const probeTargets = endpoints
+    .filter((e) => ["GET", "POST", "PUT", "PATCH"].includes(e.method))
+    .slice(0, 80)
+    .map((e) => ({
+      path: e.path.replace(/\{[^}]+\}/g, "1"),
+      method: e.method,
+      params: e.injectParams?.length ? e.injectParams : ["q", "id", "url", "redirect"],
+      hasJsonBody: e.hasJsonBody,
+      source: "openapi" as const,
+    }));
+
+  return { source, endpoints, adminEndpoints, resourcePatterns, probeTargets };
 }
 
 export async function fetchOpenApiInventory(openapiUrl: string): Promise<ApiInventory | null> {
