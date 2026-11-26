@@ -1,8 +1,10 @@
 /**
  * Slack / Teams / generic webhook dispatcher for scan lifecycle events.
+ * Also fans out to the env-configured n8n operations-security-alerts webhook.
  */
 import { createHmac } from "crypto";
 import type { IntegrationsConfig } from "./ticketingIntegration";
+import { n8nAlertFromScanEvent, sendN8nSecurityAlert } from "./n8nAlerts";
 
 export type WebhookEvent =
   | "scan.completed"
@@ -75,8 +77,7 @@ export async function dispatchWebhooks(
   config: IntegrationsConfig | null | undefined,
   payload: WebhookPayload
 ): Promise<{ sent: number; failed: number }> {
-  const endpoints = (config as any)?.webhooks as WebhookEndpoint[] | undefined;
-  if (!endpoints?.length) return { sent: 0, failed: 0 };
+  const endpoints = ((config as any)?.webhooks as WebhookEndpoint[] | undefined) || [];
 
   let sent = 0;
   let failed = 0;
@@ -107,5 +108,26 @@ export async function dispatchWebhooks(
       failed++;
     }
   }
+
+  // Env-configured n8n security alerts (independent of org integration webhooks)
+  try {
+    const n8n = n8nAlertFromScanEvent({
+      event: payload.event,
+      message: payload.message,
+      scanId: payload.scanId,
+      targetUrl: payload.targetUrl,
+      riskLevel: payload.riskLevel,
+      criticalCount: payload.criticalCount,
+      highCount: payload.highCount,
+    });
+    if (n8n) {
+      const ok = await sendN8nSecurityAlert(n8n);
+      if (ok) sent++;
+      else if (process.env.N8N_WEBHOOK_URL && process.env.N8N_WEBHOOK_TOKEN) failed++;
+    }
+  } catch {
+    failed++;
+  }
+
   return { sent, failed };
 }

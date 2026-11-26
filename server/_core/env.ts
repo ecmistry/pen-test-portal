@@ -15,4 +15,7 @@ export const ENV = {
   devBypassAuth: process.env.DEV_BYPASS_AUTH === "true",
   adminEmail: process.env.ADMIN_EMAIL ?? "",
   adminPassword: process.env.ADMIN_PASSWORD ?? "",
+  /** n8n operations-security-alerts webhook */
+  n8nWebhookUrl: process.env.N8N_WEBHOOK_URL ?? "",
+  n8nWebhookToken: process.env.N8N_WEBHOOK_TOKEN ?? "",
 };
