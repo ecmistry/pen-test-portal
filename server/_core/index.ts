@@ -45,6 +45,61 @@ async function startServer() {
   registerOAuthRoutes(app);
   registerDevAuthRoutes(app);
   registerAdminAuthRoutes(app);
+
+  // SSE live scan logs: GET /api/scans/:id/logs/stream?afterId=0
+  app.get("/api/scans/:id/logs/stream", async (req, res) => {
+    try {
+      const scanId = Number(req.params.id);
+      if (!Number.isFinite(scanId)) {
+        res.status(400).end("bad scan id");
+        return;
+      }
+      const ctx = await createContext({ req, res } as any);
+      if (!ctx.user) {
+        res.status(401).end("unauthorized");
+        return;
+      }
+      const scan = await db.getScanById(scanId);
+      if (!scan) {
+        res.status(404).end("not found");
+        return;
+      }
+      if (ctx.user.role !== "admin" && scan.userId !== ctx.user.id) {
+        res.status(403).end("forbidden");
+        return;
+      }
+
+      res.setHeader("Content-Type", "text/event-stream");
+      res.setHeader("Cache-Control", "no-cache");
+      res.setHeader("Connection", "keep-alive");
+      res.flushHeaders?.();
+
+      let afterId = Number(req.query.afterId || 0) || 0;
+      let closed = false;
+      req.on("close", () => { closed = true; });
+
+      const tick = async () => {
+        while (!closed) {
+          const logs = await db.getLogsAfterId(scanId, afterId);
+          for (const row of logs) {
+            afterId = row.id;
+            res.write(`data: ${JSON.stringify(row)}\n\n`);
+          }
+          const latest = await db.getScanById(scanId);
+          if (latest && (latest.status === "completed" || latest.status === "failed" || latest.status === "cancelled")) {
+            res.write(`event: done\ndata: ${JSON.stringify({ status: latest.status })}\n\n`);
+            res.end();
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      };
+      tick().catch(() => { try { res.end(); } catch { /* ignore */ } });
+    } catch {
+      res.status(500).end("error");
+    }
+  });
+
   // tRPC API
   app.use(
     "/api/trpc",

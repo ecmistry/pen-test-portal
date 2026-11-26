@@ -102,19 +102,21 @@ With `DEV_BYPASS_AUTH=true` and `VITE_DEV_LOGIN=true` in `.env`, use **Dev Login
 
 ## CI/CD severity gates
 
-Set `CICD_API_KEY` in `.env`. Call the tRPC mutation `cicd.scan` (HTTP POST to `/api/trpc/cicd.scan`) with JSON body:
+Create rotatable keys under **Integrations → CI/CD API keys** (or set legacy `CICD_API_KEY` in `.env`). Scans are queued (`SCAN_MAX_CONCURRENT`, default 2). Prefer async: `wait:false`, then poll `cicd.status`.
 
 ```bash
-# Example using curl + superjson-unaware raw tRPC batch style is app-specific;
-# preferred: use your CI job to call the portal's tRPC client, or:
+# Start (async)
 curl -sS -X POST "https://ghoststrike.tech/api/trpc/cicd.scan" \
   -H "Content-Type: application/json" \
-  -d '{"json":{"targetUrl":"https://app.example.com","scanMode":"light","failOnSeverity":"high","apiKey":"'"$CICD_API_KEY"'"}}'
+  -d '{"json":{"targetUrl":"https://app.example.com","scanMode":"light","failOnSeverity":"high","apiKey":"'"$API_KEY"'","wait":false}}'
+
+# Poll until status is completed|failed — exitCode 0 = pass
+curl -sS "https://ghoststrike.tech/api/trpc/cicd.status?input=..."
 ```
 
-Response includes `passed` / `exitCode` (0|1), `counts`, and `findingIds`. Fail the GitHub Actions step when `exitCode !== 0`.
+A ready-made workflow is in `.github/workflows/ghoststrike-scan.yml` (secrets: `GHOSTSTRIKE_URL`, `GHOSTSTRIKE_CICD_API_KEY`, `GHOSTSTRIKE_TARGET_URL`).
 
-Optional: set `OOB_CALLBACK_BASE` (e.g. Interactsh / OAST host) for confirmed out-of-band SSRF detection.
+OOB SSRF: `OOB_CALLBACK_BASE` or native Interactsh via `INTERACTSH_SERVER` / `INTERACTSH_TOKEN`.
 
 ## Schedules
 

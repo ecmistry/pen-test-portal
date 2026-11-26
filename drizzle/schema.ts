@@ -11,6 +11,18 @@ import {
   varchar,
 } from "drizzle-orm/mysql-core";
 
+// ─── Organizations (basic multi-tenant) ───────────────────────────────────────
+export const organizations = mysqlTable("organizations", {
+  id: int("id").autoincrement().primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  slug: varchar("slug", { length: 100 }).notNull().unique(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type Organization = typeof organizations.$inferSelect;
+export type InsertOrganization = typeof organizations.$inferInsert;
+
 // ─── Users ────────────────────────────────────────────────────────────────────
 export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),
@@ -19,6 +31,7 @@ export const users = mysqlTable("users", {
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),
   role: mysqlEnum("role", ["user", "admin"]).default("user").notNull(),
+  orgId: int("orgId"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   lastSignedIn: timestamp("lastSignedIn").defaultNow().notNull(),
@@ -31,6 +44,7 @@ export type InsertUser = typeof users.$inferInsert;
 export const targets = mysqlTable("targets", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull(),
+  orgId: int("orgId"),
   name: varchar("name", { length: 255 }).notNull(),
   url: varchar("url", { length: 2048 }).notNull(),
   repoUrl: varchar("repoUrl", { length: 2048 }),
@@ -73,7 +87,10 @@ export const scans = mysqlTable("scans", {
   startedAt: timestamp("startedAt"),
   completedAt: timestamp("completedAt"),
   errorMessage: text("errorMessage"),
-  triggeredBy: mysqlEnum("triggeredBy", ["manual", "schedule"]).default("manual").notNull(),
+  triggeredBy: mysqlEnum("triggeredBy", ["manual", "schedule", "cicd", "retest"]).default("manual").notNull(),
+  orgId: int("orgId"),
+  /** When set, this scan is a retest of a prior finding */
+  parentFindingId: int("parentFindingId"),
   scenarios: json("scenarios"),
   trendSummary: json("trendSummary"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -159,6 +176,22 @@ export const integrations = mysqlTable("integrations", {
 
 export type Integration = typeof integrations.$inferSelect;
 export type InsertIntegration = typeof integrations.$inferInsert;
+
+// ─── CI/CD API keys (hashed at rest) ──────────────────────────────────────────
+export const cicdApiKeys = mysqlTable("cicd_api_keys", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull(),
+  orgId: int("orgId"),
+  name: varchar("name", { length: 255 }).notNull(),
+  keyPrefix: varchar("keyPrefix", { length: 16 }).notNull(),
+  keyHash: varchar("keyHash", { length: 128 }).notNull(),
+  lastUsedAt: timestamp("lastUsedAt"),
+  revokedAt: timestamp("revokedAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type CicdApiKey = typeof cicdApiKeys.$inferSelect;
+export type InsertCicdApiKey = typeof cicdApiKeys.$inferInsert;
 
 // ─── Reports ──────────────────────────────────────────────────────────────────
 export const reports = mysqlTable("reports", {

@@ -96,27 +96,51 @@ export default function ScanDetail() {
     onError: (e) => toast.error(e.message),
   });
 
-  // Auto-poll while scan is running
+  const [sseLogs, setSseLogs] = useState<any[] | null>(null);
+
+  // Prefer SSE for live logs while running; fall back to polling status
   useEffect(() => {
     if (!scan) return;
-    if (scan.status === "running" || scan.status === "queued") {
-      const interval = setInterval(() => {
-        refetch();
-        refetchLogs();
-      }, 2000);
-      return () => clearInterval(interval);
+    if (scan.status !== "running" && scan.status !== "queued") {
+      setSseLogs(null);
+      return;
     }
-  }, [scan?.status]);
+    const es = new EventSource(`/api/scans/${scanId}/logs/stream`);
+    const buf: any[] = [];
+    es.onmessage = (ev) => {
+      try {
+        const row = JSON.parse(ev.data);
+        buf.push(row);
+        setSseLogs([...buf]);
+      } catch { /* ignore */ }
+    };
+    es.addEventListener("done", () => {
+      es.close();
+      refetch();
+      refetchLogs();
+      setSseLogs(null);
+    });
+    es.onerror = () => {
+      // Fall back to polling on SSE failure
+      es.close();
+    };
+    const interval = setInterval(() => refetch(), 3000);
+    return () => {
+      es.close();
+      clearInterval(interval);
+    };
+  }, [scan?.status, scanId]);
 
   // Auto-scroll logs
   useEffect(() => {
     if (logEndRef.current) {
       logEndRef.current.scrollIntoView({ behavior: "smooth" });
     }
-  }, [logs?.length]);
+  }, [logs?.length, sseLogs?.length]);
 
   const isRunning = scan?.status === "running" || scan?.status === "queued";
-  const displayedLogs = showAllLogs ? logs : logs?.slice(-50);
+  const liveLogs = sseLogs ?? logs;
+  const displayedLogs = showAllLogs ? liveLogs : liveLogs?.slice(-50);
 
   function logClass(level: string) {
     switch (level) {

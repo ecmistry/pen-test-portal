@@ -9,6 +9,9 @@ const mockDb = vi.hoisted(() => {
     "getScanTrends", "getScansByTarget", "getScansByUser", "getScheduleById", "getSchedulesByUser", "getTargetById",
     "getTargetsByUser", "updateFindingStatus", "updateSchedule", "updateTarget", "updateUserRole",
     "getIntegrationByUser", "upsertIntegration", "deleteIntegration", "getAllSchedules",
+    "ensureUserOrg", "listOrganizations", "createOrganization", "setUserOrg",
+    "createCicdApiKey", "listCicdApiKeys", "revokeCicdApiKey", "validateCicdApiKey",
+    "updateScan", "getLogsAfterId",
   ];
   return Object.fromEntries(names.map((n) => [n, vi.fn()]));
 });
@@ -19,6 +22,13 @@ vi.mock("./integrationsCrypto", () => ({
   encryptIntegrationsConfig: vi.fn((c) => JSON.stringify(c)),
   decryptIntegrationsConfig: vi.fn((s) => JSON.parse(s)),
   redactIntegrationsConfig: vi.fn((c) => c),
+}));
+
+vi.mock("./scanQueue", () => ({
+  enqueueScanDetached: vi.fn((job: () => Promise<void>) => { void job(); }),
+  enqueueScan: vi.fn(async (job: () => Promise<void>) => job()),
+  getScanQueueStats: vi.fn(() => ({ active: 0, waiting: 0, maxConcurrent: 2 })),
+  setScanMaxConcurrent: vi.fn(),
 }));
 
 vi.mock("./scanEngine", async (importOriginal) => {

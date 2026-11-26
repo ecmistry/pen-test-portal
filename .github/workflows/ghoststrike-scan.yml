@@ -1,0 +1,115 @@
+name: Ghoststrike security gate
+
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      target_url:
+        description: Target URL to scan
+        required: true
+        default: https://example.com
+
+jobs:
+  pen-test-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Start Ghoststrike CI scan
+        id: start
+        env:
+          PORTAL_URL: ${{ secrets.GHOSTSTRIKE_URL }}
+          API_KEY: ${{ secrets.GHOSTSTRIKE_CICD_API_KEY }}
+          TARGET_URL: ${{ github.event.inputs.target_url || secrets.GHOSTSTRIKE_TARGET_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PORTAL_URL:-}" ] || [ -z "${API_KEY:-}" ] || [ -z "${TARGET_URL:-}" ]; then
+            echo "Missing GHOSTSTRIKE_URL / GHOSTSTRIKE_CICD_API_KEY / GHOSTSTRIKE_TARGET_URL secrets"
+            exit 1
+          fi
+          # tRPC HTTP: POST /api/trpc/cicd.scan with JSON input wrapper
+          RESP=$(curl -sS -X POST "${PORTAL_URL%/}/api/trpc/cicd.scan" \
+            -H "content-type: application/json" \
+            -d "{\"json\":{\"targetUrl\":\"${TARGET_URL}\",\"scanMode\":\"light\",\"failOnSeverity\":\"high\",\"apiKey\":\"${API_KEY}\",\"wait\":false}}")
+          echo "$RESP" | tee /tmp/gs-start.json
+          SCAN_ID=$(python3 -c "import json,sys; d=json.load(open('/tmp/gs-start.json')); print(d.get('result',d).get('data',d).get('json',d).get('scanId') or d.get('result',{}).get('data',{}).get('scanId') or '')")
+          if [ -z "$SCAN_ID" ]; then
+            # Try nested tRPC shapes
+            SCAN_ID=$(python3 - <<'PY'
+import json
+d=json.load(open("/tmp/gs-start.json"))
+def find(o):
+  if isinstance(o, dict):
+    if "scanId" in o: return o["scanId"]
+    for v in o.values():
+      r=find(v)
+      if r is not None: return r
+  if isinstance(o, list):
+    for i in o:
+      r=find(i)
+      if r is not None: return r
+  return None
+print(find(d) or "")
+PY
+)
+          fi
+          echo "scan_id=$SCAN_ID" >> "$GITHUB_OUTPUT"
+          test -n "$SCAN_ID"
+
+      - name: Poll until complete
+        env:
+          PORTAL_URL: ${{ secrets.GHOSTSTRIKE_URL }}
+          API_KEY: ${{ secrets.GHOSTSTRIKE_CICD_API_KEY }}
+          SCAN_ID: ${{ steps.start.outputs.scan_id }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 90); do
+            RESP=$(curl -sS "${PORTAL_URL%/}/api/trpc/cicd.status?input=$(python3 -c "import urllib.parse,json; print(urllib.parse.quote(json.dumps({'json':{'scanId':int('${SCAN_ID}'),'apiKey':'${API_KEY}','failOnSeverity':'high'}})))")")
+            echo "$RESP" > /tmp/gs-status.json
+            STATUS=$(python3 - <<'PY'
+import json
+d=json.load(open("/tmp/gs-status.json"))
+def find(o,k):
+  if isinstance(o, dict):
+    if k in o: return o[k]
+    for v in o.values():
+      r=find(v,k)
+      if r is not None: return r
+  if isinstance(o, list):
+    for i in o:
+      r=find(i,k)
+      if r is not None: return r
+  return None
+print(find(d,"status") or "")
+PY
+)
+            EXIT=$(python3 - <<'PY'
+import json
+d=json.load(open("/tmp/gs-status.json"))
+def find(o,k):
+  if isinstance(o, dict):
+    if k in o: return o[k]
+    for v in o.values():
+      r=find(v,k)
+      if r is not None: return r
+  if isinstance(o, list):
+    for i in o:
+      r=find(i,k)
+      if r is not None: return r
+  return None
+v=find(d,"exitCode")
+print("" if v is None else v)
+PY
+)
+            echo "poll $i status=$STATUS exitCode=$EXIT"
+            if [ "$STATUS" = "completed" ] || [ "$STATUS" = "failed" ]; then
+              if [ "${EXIT:-1}" != "0" ]; then
+                echo "Security gate FAILED"
+                cat /tmp/gs-status.json
+                exit 1
+              fi
+              echo "Security gate PASSED"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Timed out waiting for scan"
+          exit 1

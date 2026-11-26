@@ -17,6 +17,7 @@ import type { AuthScanConfig, LoginCredentials } from "./scanEngine";
 import { runScan } from "./scanEngine";
 import { pushFindingsToTicketing } from "./ticketingIntegration";
 import { decryptIntegrationsConfig } from "./integrationsCrypto";
+import { enqueueScanDetached } from "./scanQueue";
 
 const runningScheduleIds = new Set<number>();
 let intervalHandle: ReturnType<typeof setInterval> | null = null;
@@ -140,36 +141,38 @@ export async function triggerScheduledScan(schedule: Schedule): Promise<number |
       nextRunAt: computeNextRunHint(),
     });
 
-    setImmediate(() => {
-      runScan(
-        scanId,
-        target.id,
-        target.url,
-        tools,
-        scanMode,
-        profilesConfig,
-        manifestPath ?? undefined,
-        loginCredentials,
-        target.repoUrl ?? undefined,
-        openapiUrl ?? undefined,
-      )
-        .then(async () => {
-          const autoPush = (schedule as Schedule & { autoPushTicketing?: boolean | null }).autoPushTicketing;
-          if (!autoPush) return;
+    enqueueScanDetached(async () => {
+      try {
+        await runScan(
+          scanId,
+          target.id,
+          target.url,
+          tools,
+          scanMode,
+          profilesConfig,
+          manifestPath ?? undefined,
+          loginCredentials,
+          target.repoUrl ?? undefined,
+          openapiUrl ?? undefined,
+        );
+        const autoPush = (schedule as Schedule & { autoPushTicketing?: boolean | null }).autoPushTicketing;
+        if (autoPush) {
           try {
             const integration = await getIntegrationByUser(schedule.userId);
-            if (!integration?.configEnc) return;
-            const config = decryptIntegrationsConfig(integration.configEnc);
-            const findings = await getFindingsByScan(scanId);
-            const scan = await getScanById(scanId);
-            const t = scan ? await getTargetById(scan.targetId) : target;
-            await pushFindingsToTicketing(config, findings, t?.url ?? target.url, false);
+            if (integration?.configEnc) {
+              const config = decryptIntegrationsConfig(integration.configEnc);
+              const findings = await getFindingsByScan(scanId);
+              const scan = await getScanById(scanId);
+              const t = scan ? await getTargetById(scan.targetId) : target;
+              await pushFindingsToTicketing(config, findings, t?.url ?? target.url, false);
+            }
           } catch (err) {
             console.warn("[ScheduleRunner] auto-push ticketing failed:", (err as Error).message);
           }
-        })
-        .catch((err) => console.error("[ScheduleRunner] scan failed:", err))
-        .finally(() => runningScheduleIds.delete(schedule.id));
+        }
+      } finally {
+        runningScheduleIds.delete(schedule.id);
+      }
     });
 
     return scanId;

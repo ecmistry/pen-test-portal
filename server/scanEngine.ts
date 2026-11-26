@@ -40,7 +40,7 @@
 import https from "https";
 import http from "http";
 import { URL } from "url";
-import { appendScanLog, createFindings, updateScan, updateTarget, getPreviousCompletedScan, getFindingsByScan } from "./db";
+import { appendScanLog, createFindings, updateScan, updateTarget, getPreviousCompletedScan, getFindingsByScan, getScanById, getFindingById, updateFindingStatus } from "./db";
 import { assertHostAllowed, assertSafeOutboundUrl, runTool, safeLookup } from "./netSafety";
 
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
@@ -169,10 +169,12 @@ export function isNiktoLegacyCGI(line: string): boolean {
 
 export interface AuthProfile {
   name: string;
-  type: "none" | "bearer" | "basic";
+  type: "none" | "bearer" | "basic" | "cookie";
   token?: string;
   username?: string;
   password?: string;
+  /** Cookie header value for type=cookie session profiles */
+  cookie?: string;
   /** Explicit privilege rank (0=anon … 4=admin). Overrides name heuristics when set. */
   privilegeRank?: number;
 }
@@ -200,7 +202,7 @@ export interface AuthScanConfig {
   loginCredentials?: LoginCredentials;
 }
 
-/** Build Authorization header from a profile */
+/** Build Authorization / Cookie headers from a profile */
 export function buildAuthHeader(profile: AuthProfile): Record<string, string> {
   switch (profile.type) {
     case "bearer":
@@ -210,6 +212,8 @@ export function buildAuthHeader(profile: AuthProfile): Record<string, string> {
       const encoded = Buffer.from(`${profile.username}:${profile.password ?? ""}`).toString("base64");
       return { Authorization: `Basic ${encoded}` };
     }
+    case "cookie":
+      return profile.cookie ? { Cookie: profile.cookie } : {};
     default:
       return {};
   }
@@ -1546,28 +1550,10 @@ const SSRF_PAYLOADS = [
   { payload: "http://2130706433", name: "decimal localhost" },
 ];
 
-/** Optional OOB callback base (e.g. https://xyz.oast.fun or interactsh). When set, SSRF uses unique callbacks. */
+/** Optional OOB callback base (legacy). Prefer Interactsh via createInteractshSession. */
 export function getOobCallbackBase(): string | undefined {
   const base = process.env.OOB_CALLBACK_BASE?.trim();
   return base || undefined;
-}
-
-async function pollOobHit(callbackId: string, oobBase: string): Promise<boolean> {
-  // Convention: OOB_CALLBACK_BASE host supports GET {base}/poll?id={id} returning JSON { hit: true }
-  try {
-    const pollUrl = new URL(oobBase.includes("://") ? oobBase : `https://${oobBase}`);
-    pollUrl.pathname = "/poll";
-    pollUrl.searchParams.set("id", callbackId);
-    const res = await fetch(pollUrl.toString(), {
-      headers: { Accept: "application/json", "User-Agent": "PenTestPortal/1.0" },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (!res.ok) return false;
-    const data = (await res.json().catch(() => null)) as { hit?: boolean } | null;
-    return !!data?.hit;
-  } catch {
-    return false;
-  }
 }
 
 /** Test for Server-Side Request Forgery (SSRF) vulnerabilities */
@@ -1581,19 +1567,18 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
     return findings;
   }
 
-  const oobBase = getOobCallbackBase();
-  if (oobBase) {
-    await log(scanId, "info", `OOB SSRF callbacks enabled via OOB_CALLBACK_BASE`, "ssrf");
-    const host = oobBase.replace(/^https?:\/\//, "").replace(/\/$/, "");
+  const { createInteractshSession } = await import("./interactsh");
+  const oob = await createInteractshSession();
+  if (oob) {
+    await log(scanId, "info", `OOB SSRF enabled (host ${oob.host})`, "ssrf");
     for (const param of SSRF_PARAMS.slice(0, 4)) {
-      const callbackId = `gs-${scanId}-${param}-${Date.now().toString(36)}`;
-      const payload = `http://${callbackId}.${host}`;
+      const probeId = `gs${scanId}${param.replace(/[^a-z]/gi, "").slice(0, 8)}${Date.now().toString(36).slice(-4)}`;
+      const payload = oob.makeCallbackUrl(probeId);
       try {
         const path = `/?${param}=${encodeURIComponent(payload)}`;
         await httpGet(targetUrl, path, { timeout: 5000, cookies });
-        // brief wait for async fetch
-        await new Promise((r) => setTimeout(r, 1500));
-        const hit = await pollOobHit(callbackId, oobBase.startsWith("http") ? oobBase : `https://${host}`);
+        await new Promise((r) => setTimeout(r, 2000));
+        const hit = await oob.poll(probeId);
         if (hit) {
           const title = `Confirmed OOB SSRF via ${param} parameter`;
           findings.push({
@@ -1601,7 +1586,7 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
             severity: "critical",
             title,
             description: `Out-of-band callback confirmed the server fetched an attacker-controlled URL via '${param}'.`,
-            evidence: `GET ${path}\nOOB id: ${callbackId}\nCallback host: ${host}\nPoll: hit=true`,
+            evidence: `GET ${path}\nOOB probe: ${probeId}\nCallback host: ${oob.host}\nPoll: hit=true`,
             recommendation: "Validate and sanitize URL parameters server-side. Block requests to internal/private IP ranges and untrusted hosts. Use an allowlist for permitted external domains.",
             cweId: "CWE-918",
             owaspCategory: "A10:2021 – Server-Side Request Forgery",
@@ -1610,7 +1595,7 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
             poc: {
               curlCommand: `curl "${targetUrl}${path}"`,
               requestRaw: `GET ${path} HTTP/1.1\nHost: ${new URL(targetUrl).host}`,
-              responseSnippet: `OOB callback hit for ${callbackId}`,
+              responseSnippet: `OOB callback hit for ${probeId}`,
               reproductionSteps: [
                 `Send request with ${param}=${payload}`,
                 `Confirm DNS/HTTP interaction on OOB collaborator`,
@@ -1623,6 +1608,9 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
         // continue
       }
     }
+    await oob.close?.();
+  } else {
+    await log(scanId, "info", "OOB collaborator unavailable — using heuristic SSRF checks only (set INTERACTSH_SERVER or OOB_CALLBACK_BASE)", "ssrf");
   }
 
   for (const param of SSRF_PARAMS) {
@@ -1645,9 +1633,9 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
           const title = `Potential SSRF via ${param} parameter (${name})`;
           findings.push({
             category: "SSRF",
-            severity: oobBase ? "high" : "high",
+            severity: "high",
             title,
-            description: `The parameter '${param}' accepted an internal URL (${name}) and returned a different response, suggesting the server may be fetching the provided URL.${oobBase ? "" : " (Heuristic only — set OOB_CALLBACK_BASE for confirmed OOB detection.)"}`,
+            description: `The parameter '${param}' accepted an internal URL (${name}) and returned a different response, suggesting the server may be fetching the provided URL.${oob ? "" : " (Heuristic only — configure Interactsh/OOB for confirmed detection.)"}`,
             evidence: `GET ${path} → ${resp.status} (${resp.body.length} bytes)\nResponse snippet: ${resp.body.substring(0, 300)}`,
             recommendation: "Validate and sanitize URL parameters server-side. Block requests to internal/private IP ranges. Use an allowlist for permitted external domains.",
             cweId: "CWE-918",
@@ -1825,27 +1813,51 @@ async function testGraphQL(scanId: number, targetUrl: string, cookies?: string):
     } catch { /* continue */ }
   }
 
-  // Deeply nested query (resource exhaustion)
+  // Deeply nested query (resource exhaustion) — require data success, not mere absence of words
   try {
-    const deepQuery = JSON.stringify({ query: "{ __typename ".repeat(20) + "}" .repeat(20) });
-    const resp = await httpGet(targetUrl, detectedPath, {
+    const shallow = await httpGet(targetUrl, detectedPath, {
+      method: "POST",
+      body: JSON.stringify({ query: "{ __typename }" }),
+      headers: { "Content-Type": "application/json" },
+      timeout: 5000,
+      cookies,
+    });
+    const deepQuery = JSON.stringify({ query: "{ __typename ".repeat(20) + "}".repeat(20) });
+    const deep = await httpGet(targetUrl, detectedPath, {
       method: "POST",
       body: deepQuery,
       headers: { "Content-Type": "application/json" },
       timeout: 10000,
       cookies,
     });
-    if (resp.status >= 200 && resp.status < 400 && !resp.body.includes("complexity") && !resp.body.includes("depth")) {
+    const shallowOk = shallow.status < 400 && /"data"\s*:/.test(shallow.body) && !/"errors"\s*:\s*\[[^\]]+/.test(shallow.body);
+    const deepRejected =
+      deep.status >= 400 ||
+      /depth|complexity|max.?depth|cost|too deep|query is too/i.test(deep.body) ||
+      (/"errors"\s*:\s*\[/.test(deep.body) && !/"data"\s*:\s*\{[^}]*__typename/.test(deep.body));
+    const deepAccepted =
+      deep.status < 400 &&
+      /"data"\s*:/.test(deep.body) &&
+      /__typename/.test(deep.body) &&
+      !deepRejected;
+
+    if (shallowOk && deepAccepted) {
       findings.push({
         category: "GraphQL",
-        severity: "low",
-        title: "No query depth limiting detected",
-        description: "The GraphQL endpoint does not appear to enforce query depth limits, which could allow denial-of-service via deeply nested queries.",
-        evidence: `20-level deep query accepted (status ${resp.status})`,
-        recommendation: "Implement query depth limiting and query cost analysis to prevent resource exhaustion attacks.",
+        severity: "medium",
+        title: "Deep nested GraphQL query accepted",
+        description: "A 20-level nested query returned data successfully, indicating missing or weak query depth/cost limits.",
+        evidence: `Shallow: HTTP ${shallow.status}\nDeep: HTTP ${deep.status}\nDeep snippet: ${deep.body.substring(0, 200)}`,
+        recommendation: "Implement query depth limiting (e.g. max depth 7–10) and query cost analysis to prevent resource exhaustion.",
         cweId: "CWE-400",
         owaspCategory: "A04:2021 – Insecure Design",
+        affectedUrl: `${targetUrl}${detectedPath}`,
+        affectedComponent: "GraphQL",
       });
+    } else if (shallowOk && deepRejected) {
+      await log(scanId, "success", "GraphQL depth limiting appears present (deep query rejected)", "graphql");
+    } else {
+      await log(scanId, "info", "GraphQL depth check inconclusive — not reporting", "graphql");
     }
   } catch { /* continue */ }
 
@@ -3768,6 +3780,54 @@ export function computeTrend(
   };
 }
 
+/** Fetch robots/sitemap/HTML/JS and classify routes for authz inventory */
+export async function discoverSiteRoutes(
+  scanId: number,
+  targetUrl: string,
+  cookies?: string,
+): Promise<{ adminEndpoints: string[]; resourcePatterns: string[]; allPaths: string[] }> {
+  const {
+    parseRobotsTxt,
+    parseSitemapXml,
+    parseHtmlLinks,
+    parseJsRouteHints,
+    dedupeRoutes,
+    classifyDiscoveredRoutes,
+  } = await import("./discovery");
+
+  const routes = [];
+  const origin = new URL(targetUrl).origin;
+
+  const robots = await httpGet(targetUrl, "/robots.txt", { cookies, timeout: 5000 }).catch(() => null);
+  if (robots && robots.status < 400 && !robots.body.trim().startsWith("<!")) {
+    routes.push(...parseRobotsTxt(robots.body, origin));
+    await log(scanId, "info", `robots.txt: ${routes.length} entries`, "discovery");
+  }
+
+  const sitemap = await httpGet(targetUrl, "/sitemap.xml", { cookies, timeout: 5000 }).catch(() => null);
+  if (sitemap && sitemap.status < 400 && sitemap.body.includes("<loc")) {
+    routes.push(...parseSitemapXml(sitemap.body, origin));
+  }
+
+  const home = await httpGet(targetUrl, "/", { cookies, timeout: 8000 }).catch(() => null);
+  if (home && home.status < 400) {
+    routes.push(...parseHtmlLinks(home.body, origin));
+    // Fetch a few linked JS bundles for route hints
+    const scriptSrcs = [...home.body.matchAll(/<script[^>]+src=["']([^"']+)["']/gi)].map((m) => m[1]).slice(0, 5);
+    for (const src of scriptSrcs) {
+      try {
+        const abs = new URL(src, origin);
+        if (abs.origin !== origin) continue;
+        const js = await httpGet(targetUrl, abs.pathname + abs.search, { cookies, timeout: 8000 });
+        if (js.status < 400) routes.push(...parseJsRouteHints(js.body.slice(0, 200_000)));
+      } catch { /* skip */ }
+    }
+  }
+
+  const deduped = dedupeRoutes(routes, 80);
+  return classifyDiscoveredRoutes(deduped);
+}
+
 // ─── Main Scan Runner ─────────────────────────────────────────────────────────
 export async function runScan(
   scanId: number,
@@ -3812,7 +3872,7 @@ export async function runScan(
   const allFindings: Finding[] = [];
   let endpointsTested = 0;
 
-  // Load OpenAPI inventory when configured
+  // Load OpenAPI inventory when configured; otherwise discover routes from robots/sitemap/HTML/JS
   let apiInventory: { adminEndpoints?: string[]; resourcePatterns?: string[]; coverageNote?: string } | undefined;
   if (openapiUrl) {
     try {
@@ -3842,7 +3902,6 @@ export async function runScan(
       await log(scanId, "warn", `OpenAPI inventory error: ${(err as Error).message}`, "init");
     }
   }
-
   // Authenticated scanning: login and capture session cookies/token
   let sessionCookies: string | undefined;
   if (effectiveLogin) {
@@ -3870,6 +3929,33 @@ export async function runScan(
       }
     } catch (err: any) {
       await log(scanId, "error", `Login failed: ${err.message}. Continuing without authentication.`, "init");
+    }
+  }
+
+  // Discovery crawl when OpenAPI was not provided
+  if (!apiInventory) {
+    try {
+      const discovered = await discoverSiteRoutes(scanId, targetUrl, sessionCookies);
+      if (discovered.allPaths.length > 0) {
+        apiInventory = {
+          adminEndpoints: discovered.adminEndpoints,
+          resourcePatterns: discovered.resourcePatterns,
+          coverageNote: `Discovery crawl found ${discovered.allPaths.length} routes (${discovered.adminEndpoints.length} admin-like, ${discovered.resourcePatterns.length} resource patterns)`,
+        };
+        await log(scanId, "info", apiInventory.coverageNote!, "init");
+        allFindings.push({
+          category: "Discovery",
+          severity: "info",
+          title: "Site discovery crawl completed",
+          description: apiInventory.coverageNote!,
+          evidence: `Sample paths: ${discovered.allPaths.slice(0, 15).join(", ")}`,
+          recommendation: "Provide an OpenAPI URL on the target for more precise API inventory.",
+          affectedUrl: targetUrl,
+          affectedComponent: "Discovery",
+        });
+      }
+    } catch (err) {
+      await log(scanId, "info", `Discovery crawl skipped: ${(err as Error).message}`, "init");
     }
   }
 
@@ -4433,6 +4519,32 @@ export async function runScan(
 
     // Update target's lastScannedAt
     await updateTarget(targetId, { lastScannedAt: new Date() });
+
+    // Retest close-the-loop: if this scan retests a parent finding, resolve or keep open
+    try {
+      const thisScan = await getScanById(scanId);
+      const parentId = thisScan?.parentFindingId;
+      if (parentId) {
+        const parent = await getFindingById(parentId);
+        if (parent) {
+          const stillPresent = allFindings.some((f) => {
+            const sameTitle = f.title.toLowerCase() === parent.title.toLowerCase();
+            const sameCwe = !!(parent.cweId && f.cweId && f.cweId === parent.cweId);
+            const sameCat = f.category.toLowerCase() === parent.category.toLowerCase() &&
+              f.severity === parent.severity;
+            return sameTitle || sameCwe || sameCat;
+          });
+          if (!stillPresent) {
+            await updateFindingStatus(parentId, "resolved");
+            await log(scanId, "success", `Retest: original finding #${parentId} marked resolved (no longer reproduced)`, "retest");
+          } else {
+            await log(scanId, "warn", `Retest: original finding #${parentId} still present`, "retest");
+          }
+        }
+      }
+    } catch (retestErr) {
+      await log(scanId, "info", `Retest close-loop skipped: ${(retestErr as Error).message}`, "retest");
+    }
 
     await log(scanId, "success", `\n=== Scan Complete ===`, "complete");
     await log(scanId, "success", `Security Score: ${score}/100 | Risk Level: ${riskLevel.toUpperCase()}`, "complete");

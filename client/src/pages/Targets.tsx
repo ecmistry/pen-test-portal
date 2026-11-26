@@ -45,10 +45,11 @@ const defaultForm: TargetFormData = {
 
 interface AuthProfileForm {
   name: string;
-  type: "none" | "bearer" | "basic";
+  type: "none" | "bearer" | "basic" | "cookie";
   token: string;
   username: string;
   password: string;
+  cookie?: string;
   privilegeRank: number;
 }
 
@@ -190,6 +191,7 @@ export default function Targets() {
         token: p.token || undefined,
         username: p.username || undefined,
         password: p.password || undefined,
+        cookie: p.cookie || undefined,
         privilegeRank: p.privilegeRank,
       }));
     const authTests = {
@@ -694,6 +696,7 @@ export default function Targets() {
                       <SelectContent className="bg-card border-border">
                         <SelectItem value="bearer">Bearer</SelectItem>
                         <SelectItem value="basic">Basic</SelectItem>
+                        <SelectItem value="cookie">Cookie session</SelectItem>
                         <SelectItem value="none">None</SelectItem>
                       </SelectContent>
                     </Select>
@@ -721,6 +724,17 @@ export default function Targets() {
                           setAuthForm({ ...authForm, profiles });
                         }} className="bg-input border-border text-sm h-8" />
                       </>
+                    ) : p.type === "cookie" ? (
+                      <Input
+                        placeholder="session=abc; other=xyz"
+                        value={(p as any).cookie || ""}
+                        onChange={(e) => {
+                          const profiles = [...authForm.profiles];
+                          profiles[idx] = { ...p, cookie: e.target.value } as any;
+                          setAuthForm({ ...authForm, profiles });
+                        }}
+                        className="bg-input border-border text-sm h-8 col-span-2"
+                      />
                     ) : null}
                     <div className="col-span-2 flex items-center gap-2">
                       <Label className="text-xs text-muted-foreground">Rank 0–4</Label>

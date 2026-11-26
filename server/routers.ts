@@ -30,14 +30,23 @@ import {
   getSchedulesByUser,
   getTargetById,
   getTargetsByUser,
+  createCicdApiKey,
+  createOrganization,
   deleteIntegration,
+  ensureUserOrg,
   getIntegrationByUser,
+  listCicdApiKeys,
+  listOrganizations,
+  revokeCicdApiKey,
+  setUserOrg,
   updateFindingStatus,
   updateSchedule,
   updateTarget,
   updateUserRole,
   upsertIntegration,
+  validateCicdApiKey,
 } from "./db";
+import { enqueueScanDetached, getScanQueueStats } from "./scanQueue";
 import type { Scan, ScanFinding, Target } from "../drizzle/schema";
 import { generateExecutiveSummary, generateJSONReport, generateMarkdownReport } from "./reportGenerator";
 import { generatePdfReport } from "./pdfReport";
@@ -60,10 +69,11 @@ const toolList = z.array(z.string().max(64)).max(64);
 
 const authProfileSchema = z.object({
   name: z.string().max(255),
-  type: z.enum(["none", "bearer", "basic"]),
+  type: z.enum(["none", "bearer", "basic", "cookie"]),
   token: z.string().max(8192).optional(),
   username: z.string().max(255).optional(),
   password: z.string().max(1024).optional(),
+  cookie: z.string().max(8192).optional(),
   privilegeRank: z.number().int().min(0).max(4).optional(),
 });
 
@@ -116,6 +126,54 @@ const integrationsConfigSchema = z.object({
     minSeverity: z.enum(["critical", "high", "medium", "low"]).default("high"),
   }).optional(),
 });
+
+async function buildCicdStatusPayload(scanId: number, targetUrl: string, failThreshold: string) {
+  const scan = await getScanById(scanId);
+  const findings = await getFindingsByScan(scanId);
+  const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+  const threshold = severityOrder[failThreshold] ?? 1;
+  const failFindings = findings.filter((f) => (severityOrder[f.severity] ?? 4) <= threshold);
+  const passed = scan?.status === "failed" ? false : failFindings.length === 0;
+  const grade = (() => {
+    const s = scan?.securityScore ?? 0;
+    return s >= 90 ? "A" : s >= 80 ? "B" : s >= 70 ? "C" : s >= 55 ? "D" : "F";
+  })();
+  const counts = {
+    critical: findings.filter((f) => f.severity === "critical").length,
+    high: findings.filter((f) => f.severity === "high").length,
+    medium: findings.filter((f) => f.severity === "medium").length,
+    low: findings.filter((f) => f.severity === "low").length,
+    info: findings.filter((f) => f.severity === "info").length,
+  };
+  return {
+    scanId,
+    status: scan?.status ?? "unknown",
+    pass: passed,
+    passed,
+    exitCode: passed ? 0 : 1,
+    targetUrl,
+    securityScore: scan?.securityScore ?? 0,
+    securityGrade: grade,
+    riskLevel: scan?.riskLevel ?? "unknown",
+    threshold: failThreshold,
+    failOnSeverity: failThreshold,
+    totalFindings: findings.length,
+    failingFindings: failFindings.length,
+    counts,
+    bySeverity: counts,
+    findingIds: failFindings.map((f) => f.id),
+    findings: findings.map((f) => ({
+      id: f.id,
+      title: f.title,
+      severity: f.severity,
+      category: f.category,
+      cvssScore: f.cvssScore ? Number(f.cvssScore) : null,
+      cweId: f.cweId,
+      recommendation: f.recommendation,
+    })),
+    summary: `${passed ? "PASS" : "FAIL"} — ${findings.length} finding(s), ${failFindings.length} at or above ${failThreshold}. Score: ${scan?.securityScore ?? 0}/100 (Grade ${grade}).`,
+  };
+}
 const listLimit = z.number().int().min(1).max(500);
 
 async function assertSafeUrlInput(url: string, protocols?: string[]) {
@@ -262,9 +320,11 @@ export const appRouter = router({
         if (input.openapiUrl) await assertSafeUrlInput(input.openapiUrl);
         if (input.authConfig?.loginCredentials) await assertSafeUrlInput(input.authConfig.loginCredentials.loginUrl);
         const { openapiUrl, manifestPath, authConfig, ...rest } = input;
+        const orgId = await ensureUserOrg(ctx.user.id);
         await createTarget({
           ...rest,
           userId: ctx.user.id,
+          orgId: orgId ?? null,
           openapiUrl: openapiUrl || null,
           manifestPath: manifestPath || null,
           authConfig: authConfig ?? null,
@@ -389,7 +449,13 @@ export const appRouter = router({
           undefined;
         const openapiUrl = (target as Target & { openapiUrl?: string | null }).openapiUrl ?? undefined;
 
-        setImmediate(() => {
+        const orgId = target.orgId ?? (await ensureUserOrg(ctx.user.id));
+        if (orgId) {
+          const { updateScan } = await import("./db");
+          await updateScan(scanId, { orgId });
+        }
+
+        enqueueScanDetached(() =>
           runScan(
             scanId,
             target.id,
@@ -401,10 +467,10 @@ export const appRouter = router({
             loginCreds,
             target.repoUrl ?? undefined,
             openapiUrl ?? undefined
-          ).catch(console.error);
-        });
+          )
+        );
 
-        return { scanId, success: true };
+        return { scanId, success: true, queue: getScanQueueStats() };
       }),
 
     logs: protectedProcedure.input(z.object({ scanId: z.number() })).query(async ({ ctx, input }) => {
@@ -506,11 +572,13 @@ export const appRouter = router({
           status: "queued",
           tools: tools.join(","),
           scanMode: "light",
-          triggeredBy: "manual",
+          triggeredBy: "retest",
+          parentFindingId: finding.id,
+          orgId: target.orgId ?? null,
         });
 
         const storedAuth = (target.authConfig ?? undefined) as AuthScanConfig | undefined;
-        setImmediate(() => {
+        enqueueScanDetached(() =>
           runScan(
             scanId,
             target.id,
@@ -522,10 +590,10 @@ export const appRouter = router({
             storedAuth?.loginCredentials,
             target.repoUrl ?? undefined,
             (target as Target & { openapiUrl?: string | null }).openapiUrl ?? undefined
-          ).catch(console.error);
-        });
+          )
+        );
 
-        return { success: true, scanId, retestedFindingId: finding.id };
+        return { success: true, scanId, retestedFindingId: finding.id, parentFindingId: finding.id };
       }),
 
     recentFindings: protectedProcedure.query(async ({ ctx }) => {
@@ -768,91 +836,123 @@ export const appRouter = router({
     }),
   }),
 
+  // ─── Organizations ────────────────────────────────────────────────────────
+  orgs: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      if (ctx.user.role === "admin") return listOrganizations();
+      const orgId = await ensureUserOrg(ctx.user.id);
+      if (!orgId) return [];
+      const all = await listOrganizations();
+      return all.filter((o) => o.id === orgId);
+    }),
+    create: adminProcedure
+      .input(z.object({ name: z.string().min(1).max(255), slug: z.string().min(1).max(100).regex(/^[a-z0-9-]+$/) }))
+      .mutation(async ({ input }) => {
+        const id = await createOrganization(input.name, input.slug);
+        return { success: true, id };
+      }),
+    assignUser: adminProcedure
+      .input(z.object({ userId: z.number(), orgId: z.number() }))
+      .mutation(async ({ input }) => {
+        await setUserOrg(input.userId, input.orgId);
+        return { success: true };
+      }),
+  }),
+
   // ─── CI/CD Pipeline ───────────────────────────────────────────────────────
   cicd: router({
+    createKey: protectedProcedure
+      .input(z.object({ name: z.string().min(1).max(255).default("CI key") }))
+      .mutation(async ({ ctx, input }) => {
+        const orgId = await ensureUserOrg(ctx.user.id);
+        const created = await createCicdApiKey(ctx.user.id, input.name, orgId);
+        return { ...created, note: "Copy this API key now — it will not be shown again." };
+      }),
+
+    listKeys: protectedProcedure.query(async ({ ctx }) => {
+      return listCicdApiKeys(ctx.user.id, ctx.user.role === "admin");
+    }),
+
+    revokeKey: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const ok = await revokeCicdApiKey(input.id, ctx.user.id, ctx.user.role === "admin");
+        if (!ok) throw new TRPCError({ code: "NOT_FOUND" });
+        return { success: true };
+      }),
+
+    /** Async start — returns scanId immediately; poll with cicd.status */
     scan: publicProcedure
       .input(z.object({
         targetUrl: httpUrl,
         tools: toolList.default([...LIGHT_DEFAULT_TOOLS]),
         scanMode: z.enum(["light", "full"]).default("light"),
-        /** Preferred alias */
         failOnSeverity: z.enum(["critical", "high", "medium", "low"]).optional(),
-        /** Backward-compatible alias */
         failOn: z.enum(["critical", "high", "medium", "low"]).optional(),
         apiKey: z.string().min(1).max(512),
+        /** When true, wait for completion (legacy sync behavior, still queued) */
+        wait: z.boolean().default(false),
       }))
       .mutation(async ({ input }) => {
-        const expectedKey = process.env.CICD_API_KEY;
-        if (!expectedKey || !safeEqual(input.apiKey, expectedKey)) {
-          throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid CI/CD API key" });
-        }
+        const auth = await validateCicdApiKey(input.apiKey);
+        if (!auth.ok) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid CI/CD API key" });
         await assertSafeUrlInput(input.targetUrl);
 
-        const ciUserId = 0;
-        const ciTargetId = 0;
         const failThreshold = input.failOnSeverity ?? input.failOn ?? "high";
-
-        const { runScan: runScanFn } = await import("./scanEngine");
-        const { createScan: createScanFn, getScanById: getScanByIdFn, getFindingsByScan: getFindingsByIdFn } = await import("./db");
-
-        const scanId = await createScanFn({
-          targetId: ciTargetId,
-          userId: ciUserId,
+        const scanId = await createScan({
+          targetId: 0,
+          userId: auth.userId,
           tools: input.tools.join(","),
           scanMode: input.scanMode,
-          triggeredBy: "manual",
+          triggeredBy: "cicd",
+          orgId: auth.orgId,
+          status: "queued",
         });
 
-        await runScanFn(scanId, ciTargetId, input.targetUrl, input.tools, input.scanMode);
+        const job = () => runScan(scanId, 0, input.targetUrl, input.tools, input.scanMode);
 
-        const scan = await getScanByIdFn(scanId);
-        const findings = await getFindingsByIdFn(scanId);
+        if (input.wait) {
+          const { enqueueScan } = await import("./scanQueue");
+          await enqueueScan(job);
+          return buildCicdStatusPayload(scanId, input.targetUrl, failThreshold);
+        }
 
-        const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-        const threshold = severityOrder[failThreshold] ?? 1;
-        const failFindings = findings.filter((f) => (severityOrder[f.severity] ?? 4) <= threshold);
-        const passed = failFindings.length === 0;
-        const grade = (() => { const s = scan?.securityScore ?? 0; return s >= 90 ? "A" : s >= 80 ? "B" : s >= 70 ? "C" : s >= 55 ? "D" : "F"; })();
-
+        enqueueScanDetached(job);
         return {
-          pass: passed,
-          passed,
-          exitCode: passed ? 0 : 1,
           scanId,
-          targetUrl: input.targetUrl,
-          securityScore: scan?.securityScore ?? 0,
-          securityGrade: grade,
-          riskLevel: scan?.riskLevel ?? "unknown",
-          threshold: failThreshold,
+          status: "queued" as const,
           failOnSeverity: failThreshold,
-          totalFindings: findings.length,
-          failingFindings: failFindings.length,
-          counts: {
-            critical: findings.filter((f) => f.severity === "critical").length,
-            high: findings.filter((f) => f.severity === "high").length,
-            medium: findings.filter((f) => f.severity === "medium").length,
-            low: findings.filter((f) => f.severity === "low").length,
-            info: findings.filter((f) => f.severity === "info").length,
-          },
-          bySeverity: {
-            critical: findings.filter((f) => f.severity === "critical").length,
-            high: findings.filter((f) => f.severity === "high").length,
-            medium: findings.filter((f) => f.severity === "medium").length,
-            low: findings.filter((f) => f.severity === "low").length,
-            info: findings.filter((f) => f.severity === "info").length,
-          },
-          findingIds: failFindings.map((f) => f.id),
-          findings: findings.map((f) => ({
-            id: f.id,
-            title: f.title,
-            severity: f.severity,
-            category: f.category,
-            cvssScore: f.cvssScore ? Number(f.cvssScore) : null,
-            cweId: f.cweId,
-            recommendation: f.recommendation,
-          })),
-          summary: `${passed ? "PASS" : "FAIL"} — ${findings.length} finding(s), ${failFindings.length} at or above ${failThreshold} severity. Score: ${scan?.securityScore ?? 0}/100 (Grade ${grade}).`,
+          queue: getScanQueueStats(),
+          message: "Scan queued. Poll cicd.status until status is completed or failed.",
         };
+      }),
+
+    status: publicProcedure
+      .input(z.object({
+        scanId: z.number(),
+        apiKey: z.string().min(1).max(512),
+        failOnSeverity: z.enum(["critical", "high", "medium", "low"]).default("high"),
+      }))
+      .query(async ({ input }) => {
+        const auth = await validateCicdApiKey(input.apiKey);
+        if (!auth.ok) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid CI/CD API key" });
+        const scan = await getScanById(input.scanId);
+        if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+        if (auth.userId !== 0 && scan.userId !== auth.userId && auth.userId !== 0) {
+          // env key (userId 0) can read any CI scan; DB keys only their own
+          if (scan.userId !== auth.userId) throw new TRPCError({ code: "FORBIDDEN" });
+        }
+        if (scan.status !== "completed" && scan.status !== "failed") {
+          return {
+            scanId: scan.id,
+            status: scan.status,
+            queue: getScanQueueStats(),
+            pass: null,
+            passed: null,
+            exitCode: null,
+          };
+        }
+        return buildCicdStatusPayload(scan.id, "(stored)", input.failOnSeverity);
       }),
   }),
 
@@ -889,6 +989,10 @@ export const appRouter = router({
 
     getScanCapabilitiesStatus: adminProcedure.query(async () => {
       return getPenTestCache();
+    }),
+
+    scanQueueStats: adminProcedure.query(async () => {
+      return getScanQueueStats();
     }),
   }),
 });

@@ -1,7 +1,9 @@
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
+  InsertCicdApiKey,
   InsertIntegration,
+  InsertOrganization,
   InsertReport,
   InsertScan,
   InsertScanFinding,
@@ -9,7 +11,9 @@ import {
   InsertSchedule,
   InsertTarget,
   InsertUser,
+  cicdApiKeys,
   integrations,
+  organizations,
   reports,
   scanFindings,
   scanLogs,
@@ -19,6 +23,7 @@ import {
   users,
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
+import { createHash, randomBytes } from "crypto";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -53,6 +58,15 @@ async function applyLightMigrations(db: ReturnType<typeof drizzle>) {
   await safeAlter("ALTER TABLE targets ADD COLUMN manifestPath VARCHAR(500) DEFAULT NULL");
   await safeAlter("ALTER TABLE schedules ADD COLUMN scanMode VARCHAR(20) DEFAULT 'light' NOT NULL");
   await safeAlter("ALTER TABLE schedules ADD COLUMN autoPushTicketing BOOLEAN DEFAULT FALSE NOT NULL");
+  await safeAlter("ALTER TABLE users ADD COLUMN orgId INT DEFAULT NULL");
+  await safeAlter("ALTER TABLE targets ADD COLUMN orgId INT DEFAULT NULL");
+  await safeAlter("ALTER TABLE scans ADD COLUMN orgId INT DEFAULT NULL");
+  await safeAlter("ALTER TABLE scans ADD COLUMN parentFindingId INT DEFAULT NULL");
+  try {
+    await db.execute(sql.raw(
+      "ALTER TABLE scans MODIFY COLUMN triggeredBy ENUM('manual','schedule','cicd','retest') NOT NULL DEFAULT 'manual'"
+    ));
+  } catch { /* enum may already include values */ }
   await safeAlter("ALTER TABLE reports MODIFY markdownContent MEDIUMTEXT");
   await safeAlter("ALTER TABLE reports MODIFY executiveSummary MEDIUMTEXT");
   await safeAlter("ALTER TABLE reports MODIFY complianceNotes MEDIUMTEXT");
@@ -67,6 +81,47 @@ async function applyLightMigrations(db: ReturnType<typeof drizzle>) {
       )
     `));
   } catch { /* table may exist */ }
+  try {
+    await db.execute(sql.raw(`
+      CREATE TABLE IF NOT EXISTS organizations (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        slug VARCHAR(100) NOT NULL UNIQUE,
+        createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `));
+  } catch { /* exists */ }
+  try {
+    await db.execute(sql.raw(`
+      CREATE TABLE IF NOT EXISTS cicd_api_keys (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        userId INT NOT NULL,
+        orgId INT NULL,
+        name VARCHAR(255) NOT NULL,
+        keyPrefix VARCHAR(16) NOT NULL,
+        keyHash VARCHAR(128) NOT NULL,
+        lastUsedAt TIMESTAMP NULL,
+        revokedAt TIMESTAMP NULL,
+        createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `));
+  } catch { /* exists */ }
+
+  // Ensure a default organization exists and backfill users/targets without orgId
+  try {
+    const existing = await db.select().from(organizations).limit(1);
+    let orgId = existing[0]?.id;
+    if (!orgId) {
+      const ins = await db.insert(organizations).values({ name: "Default", slug: "default" } satisfies InsertOrganization);
+      orgId = (ins as any)[0]?.insertId as number;
+    }
+    if (orgId) {
+      await db.execute(sql.raw(`UPDATE users SET orgId = ${orgId} WHERE orgId IS NULL`));
+      await db.execute(sql.raw(`UPDATE targets SET orgId = ${orgId} WHERE orgId IS NULL`));
+      await db.execute(sql.raw(`UPDATE scans SET orgId = ${orgId} WHERE orgId IS NULL`));
+    }
+  } catch { /* best-effort backfill */ }
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────────
@@ -223,6 +278,26 @@ export async function getActiveScans() {
   return db.select().from(scans).where(
     sql`${scans.status} IN ('queued', 'running')`
   ).orderBy(scans.createdAt);
+}
+
+export async function countRunningScans(): Promise<number> {
+  const db = await getDb();
+  if (!db) return 0;
+  const [row] = await db
+    .select({ count: sql<number>`COUNT(*)` })
+    .from(scans)
+    .where(sql`${scans.status} = 'running'`);
+  return Number(row?.count ?? 0);
+}
+
+export async function getLogsAfterId(scanId: number, afterId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db
+    .select()
+    .from(scanLogs)
+    .where(and(eq(scanLogs.scanId, scanId), sql`${scanLogs.id} > ${afterId}`))
+    .orderBy(scanLogs.id);
 }
 
 /** Mark any scans still "queued" or "running" as failed (e.g. after server restart). Call on startup. */
@@ -468,4 +543,133 @@ export async function deleteIntegration(userId: number) {
   const db = await getDb();
   if (!db) throw new Error("DB unavailable");
   await db.delete(integrations).where(eq(integrations.userId, userId));
+}
+
+// ─── Organizations ────────────────────────────────────────────────────────────
+export async function getOrganizationById(id: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(organizations).where(eq(organizations.id, id)).limit(1);
+  return rows[0];
+}
+
+export async function listOrganizations() {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(organizations).orderBy(organizations.name);
+}
+
+export async function ensureUserOrg(userId: number): Promise<number | null> {
+  const db = await getDb();
+  if (!db) return null;
+  const [user] = await db.select().from(users).where(eq(users.id, userId)).limit(1);
+  if (!user) return null;
+  if (user.orgId) return user.orgId;
+  const orgs = await listOrganizations();
+  const orgId = orgs[0]?.id;
+  if (orgId) {
+    await db.update(users).set({ orgId }).where(eq(users.id, userId));
+    return orgId;
+  }
+  return null;
+}
+
+export async function setUserOrg(userId: number, orgId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  await db.update(users).set({ orgId }).where(eq(users.id, userId));
+}
+
+export async function createOrganization(name: string, slug: string) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  const result = await db.insert(organizations).values({ name, slug });
+  return (result as any)[0]?.insertId as number;
+}
+
+// ─── CI/CD API keys ───────────────────────────────────────────────────────────
+function hashCicdKey(raw: string): string {
+  return createHash("sha256").update(raw).digest("hex");
+}
+
+export async function createCicdApiKey(userId: number, name: string, orgId?: number | null) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  const raw = `gs_${randomBytes(24).toString("base64url")}`;
+  const keyPrefix = raw.slice(0, 10);
+  const keyHash = hashCicdKey(raw);
+  const result = await db.insert(cicdApiKeys).values({
+    userId,
+    orgId: orgId ?? null,
+    name,
+    keyPrefix,
+    keyHash,
+  } satisfies InsertCicdApiKey);
+  const id = (result as any)[0]?.insertId as number;
+  return { id, apiKey: raw, keyPrefix };
+}
+
+export async function listCicdApiKeys(userId: number, isAdmin: boolean) {
+  const db = await getDb();
+  if (!db) return [];
+  if (isAdmin) {
+    return db.select({
+      id: cicdApiKeys.id,
+      userId: cicdApiKeys.userId,
+      orgId: cicdApiKeys.orgId,
+      name: cicdApiKeys.name,
+      keyPrefix: cicdApiKeys.keyPrefix,
+      lastUsedAt: cicdApiKeys.lastUsedAt,
+      revokedAt: cicdApiKeys.revokedAt,
+      createdAt: cicdApiKeys.createdAt,
+    }).from(cicdApiKeys).orderBy(desc(cicdApiKeys.createdAt));
+  }
+  return db.select({
+    id: cicdApiKeys.id,
+    userId: cicdApiKeys.userId,
+    orgId: cicdApiKeys.orgId,
+    name: cicdApiKeys.name,
+    keyPrefix: cicdApiKeys.keyPrefix,
+    lastUsedAt: cicdApiKeys.lastUsedAt,
+    revokedAt: cicdApiKeys.revokedAt,
+    createdAt: cicdApiKeys.createdAt,
+  }).from(cicdApiKeys).where(eq(cicdApiKeys.userId, userId)).orderBy(desc(cicdApiKeys.createdAt));
+}
+
+export async function revokeCicdApiKey(id: number, userId: number, isAdmin: boolean) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  const [row] = await db.select().from(cicdApiKeys).where(eq(cicdApiKeys.id, id)).limit(1);
+  if (!row) return false;
+  if (!isAdmin && row.userId !== userId) return false;
+  await db.update(cicdApiKeys).set({ revokedAt: new Date() }).where(eq(cicdApiKeys.id, id));
+  return true;
+}
+
+/** Validate raw API key against DB hashes or legacy env CICD_API_KEY. Returns owner userId or 0 for env key. */
+export async function validateCicdApiKey(raw: string): Promise<{ ok: boolean; userId: number; orgId: number | null }> {
+  const envKey = process.env.CICD_API_KEY;
+  if (envKey && envKey.length > 0) {
+    const { safeEqual } = await import("./_core/security");
+    if (safeEqual(raw, envKey)) return { ok: true, userId: 0, orgId: null };
+  }
+  const db = await getDb();
+  if (!db) return { ok: false, userId: 0, orgId: null };
+  const keyHash = hashCicdKey(raw);
+  const [row] = await db.select().from(cicdApiKeys).where(eq(cicdApiKeys.keyHash, keyHash)).limit(1);
+  if (!row || row.revokedAt) return { ok: false, userId: 0, orgId: null };
+  await db.update(cicdApiKeys).set({ lastUsedAt: new Date() }).where(eq(cicdApiKeys.id, row.id));
+  return { ok: true, userId: row.userId, orgId: row.orgId ?? null };
+}
+
+export async function getTargetsByOrg(orgId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(targets).where(eq(targets.orgId, orgId)).orderBy(desc(targets.createdAt));
+}
+
+export async function getScansByOrg(orgId: number, limit = 50) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(scans).where(eq(scans.orgId, orgId)).orderBy(desc(scans.createdAt)).limit(limit);
 }

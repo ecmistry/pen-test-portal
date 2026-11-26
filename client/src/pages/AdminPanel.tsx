@@ -16,6 +16,9 @@ export default function AdminPanel() {
   const { data: adminStats, isLoading: statsLoading } = trpc.admin.globalStats.useQuery();
   const { data: users, isLoading: usersLoading } = trpc.admin.users.useQuery();
   const { data: allScans } = trpc.admin.allScans.useQuery({ limit: 20 });
+  const { data: queueStats } = trpc.admin.scanQueueStats.useQuery(undefined, {
+    refetchInterval: 5000,
+  });
 
   const updateRoleMutation = trpc.admin.updateUserRole.useMutation({
     onSuccess: () => {
@@ -100,6 +103,22 @@ export default function AdminPanel() {
               <div className="text-xs text-muted-foreground mt-0.5">{s.label}</div>
             </div>
           ))}
+        </div>
+
+        <div className="bg-card border border-border rounded-xl px-5 py-4 flex flex-wrap items-center gap-6">
+          <div className="flex items-center gap-2">
+            <Zap className="w-4 h-4 text-primary" />
+            <h3 className="text-sm font-semibold text-foreground">Scan queue</h3>
+          </div>
+          <div className="text-sm text-muted-foreground">
+            Active: <span className="text-foreground font-medium">{queueStats?.active ?? "—"}</span>
+          </div>
+          <div className="text-sm text-muted-foreground">
+            Waiting: <span className="text-foreground font-medium">{queueStats?.waiting ?? "—"}</span>
+          </div>
+          <div className="text-sm text-muted-foreground">
+            Max concurrent: <span className="text-foreground font-medium">{queueStats?.maxConcurrent ?? "—"}</span>
+          </div>
         </div>
 
         {/* User management */}

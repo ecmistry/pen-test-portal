@@ -72,6 +72,25 @@ export default function Integrations() {
     onError: (e) => toast.error(e.message),
   });
 
+  const { data: cicdKeys } = trpc.cicd.listKeys.useQuery();
+  const [newKeyName, setNewKeyName] = useState("CI key");
+  const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const createKeyMutation = trpc.cicd.createKey.useMutation({
+    onSuccess: (data) => {
+      utils.cicd.listKeys.invalidate();
+      setRevealedKey(data.apiKey);
+      toast.success("CI API key created — copy it now");
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const revokeKeyMutation = trpc.cicd.revokeKey.useMutation({
+    onSuccess: () => {
+      utils.cicd.listKeys.invalidate();
+      toast.success("Key revoked");
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
   function handleSave() {
     saveMutation.mutate({
       config: {
@@ -202,6 +221,51 @@ export default function Integrations() {
                 <Trash2 className="w-4 h-4 mr-2" /> Clear
               </Button>
             </div>
+
+            <section className="space-y-3 rounded-xl border border-border p-4">
+              <h3 className="font-medium text-foreground">CI/CD API keys</h3>
+              <p className="text-xs text-muted-foreground">
+                Create rotatable keys for pipeline gates (`cicd.scan` / `cicd.status`). Legacy `CICD_API_KEY` env still works.
+              </p>
+              {revealedKey && (
+                <div className="rounded-lg border border-amber-700/40 bg-amber-950/30 p-3 text-xs font-mono break-all text-amber-200">
+                  {revealedKey}
+                </div>
+              )}
+              <div className="flex gap-2 items-end">
+                <div className="flex-1">
+                  <Label className="text-sm">Name</Label>
+                  <Input value={newKeyName} onChange={(e) => setNewKeyName(e.target.value)} />
+                </div>
+                <Button
+                  onClick={() => createKeyMutation.mutate({ name: newKeyName || "CI key" })}
+                  disabled={createKeyMutation.isPending}
+                >
+                  Create key
+                </Button>
+              </div>
+              <div className="divide-y divide-border rounded-lg border border-border">
+                {(cicdKeys ?? []).map((k) => (
+                  <div key={k.id} className="flex items-center justify-between gap-3 p-3 text-sm">
+                    <div>
+                      <div className="text-foreground">{k.name}</div>
+                      <div className="text-xs text-muted-foreground font-mono">
+                        {k.keyPrefix}… {k.revokedAt ? "(revoked)" : ""}
+                        {k.lastUsedAt ? ` · last used ${new Date(k.lastUsedAt).toLocaleString()}` : ""}
+                      </div>
+                    </div>
+                    {!k.revokedAt && (
+                      <Button size="sm" variant="outline" onClick={() => revokeKeyMutation.mutate({ id: k.id })}>
+                        Revoke
+                      </Button>
+                    )}
+                  </div>
+                ))}
+                {!cicdKeys?.length && (
+                  <div className="p-3 text-xs text-muted-foreground">No keys yet</div>
+                )}
+              </div>
+            </section>
           </div>
         )}
       </div>
