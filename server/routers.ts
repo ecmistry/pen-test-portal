@@ -30,10 +30,13 @@ import {
   getSchedulesByUser,
   getTargetById,
   getTargetsByUser,
+  deleteIntegration,
+  getIntegrationByUser,
   updateFindingStatus,
   updateSchedule,
   updateTarget,
   updateUserRole,
+  upsertIntegration,
 } from "./db";
 import type { Scan, ScanFinding, Target } from "../drizzle/schema";
 import { generateExecutiveSummary, generateJSONReport, generateMarkdownReport } from "./reportGenerator";
@@ -44,10 +47,75 @@ import { getPenTestCache, updatePenTestCapabilities } from "./penTestUpdater";
 import { enrichFinding } from "./findingEnrichment";
 import { assertSafeOutboundUrl, isHttpUrl } from "./netSafety";
 import { safeEqual } from "./_core/security";
+import {
+  decryptIntegrationsConfig,
+  encryptIntegrationsConfig,
+  redactIntegrationsConfig,
+} from "./integrationsCrypto";
+import { LIGHT_DEFAULT_TOOLS } from "@shared/scanTools";
 
 const httpUrl = z.string().max(2048).url().refine(isHttpUrl, "URL must use http or https");
 const httpsUrl = z.string().max(2048).url().refine(u => u.startsWith("https://") && isHttpUrl(u), "URL must use https");
 const toolList = z.array(z.string().max(64)).max(64);
+
+const authProfileSchema = z.object({
+  name: z.string().max(255),
+  type: z.enum(["none", "bearer", "basic"]),
+  token: z.string().max(8192).optional(),
+  username: z.string().max(255).optional(),
+  password: z.string().max(1024).optional(),
+  privilegeRank: z.number().int().min(0).max(4).optional(),
+});
+
+const authTestsSchema = z.object({
+  verticalEscalation: z.boolean().optional(),
+  horizontalEscalation: z.boolean().optional(),
+  sessionExpiry: z.boolean().optional(),
+  tokenReuse: z.boolean().optional(),
+});
+
+const loginCredentialsSchema = z.object({
+  loginUrl: httpUrl,
+  username: z.string().max(255),
+  password: z.string().max(1024),
+  usernameField: z.string().max(255).optional(),
+  passwordField: z.string().max(255).optional(),
+  loginMethod: z.enum(["form", "json"]).optional(),
+});
+
+const authConfigSchema = z.object({
+  authProfiles: z.array(authProfileSchema).max(10).optional(),
+  authTests: authTestsSchema.optional(),
+  loginCredentials: loginCredentialsSchema.optional(),
+});
+
+const integrationsConfigSchema = z.object({
+  jira: z.object({
+    enabled: z.boolean(),
+    baseUrl: httpsUrl,
+    projectKey: z.string(),
+    apiToken: z.string(),
+    email: z.string(),
+    minSeverity: z.enum(["critical", "high", "medium", "low"]).default("medium"),
+    issueType: z.string().optional(),
+    labels: z.array(z.string()).optional(),
+    deduplication: z.boolean().optional(),
+    reopenResolved: z.boolean().optional(),
+  }).optional(),
+  github: z.object({
+    enabled: z.boolean(),
+    repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "repo must be owner/name"),
+    token: z.string(),
+    minSeverity: z.enum(["critical", "high", "medium", "low"]).default("high"),
+    labels: z.array(z.string()).optional(),
+  }).optional(),
+  linear: z.object({
+    enabled: z.boolean(),
+    apiKey: z.string(),
+    teamId: z.string(),
+    minSeverity: z.enum(["critical", "high", "medium", "low"]).default("high"),
+  }).optional(),
+});
 const listLimit = z.number().int().min(1).max(500);
 
 async function assertSafeUrlInput(url: string, protocols?: string[]) {
@@ -183,12 +251,24 @@ export const appRouter = router({
           description: z.string().max(5000).optional(),
           tags: z.string().max(1000).optional(),
           scanFrequency: z.enum(["manual", "daily", "weekly", "monthly"]).default("manual"),
+          openapiUrl: httpUrl.optional().or(z.literal("")),
+          manifestPath: z.string().max(500).optional().or(z.literal("")),
+          authConfig: authConfigSchema.optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
         await assertSafeUrlInput(input.url);
         if (input.repoUrl) await assertSafeUrlInput(input.repoUrl, ["https:"]);
-        await createTarget({ ...input, userId: ctx.user.id });
+        if (input.openapiUrl) await assertSafeUrlInput(input.openapiUrl);
+        if (input.authConfig?.loginCredentials) await assertSafeUrlInput(input.authConfig.loginCredentials.loginUrl);
+        const { openapiUrl, manifestPath, authConfig, ...rest } = input;
+        await createTarget({
+          ...rest,
+          userId: ctx.user.id,
+          openapiUrl: openapiUrl || null,
+          manifestPath: manifestPath || null,
+          authConfig: authConfig ?? null,
+        });
         return { success: true };
       }),
 
@@ -203,6 +283,9 @@ export const appRouter = router({
           tags: z.string().max(1000).optional(),
           scanFrequency: z.enum(["manual", "daily", "weekly", "monthly"]).optional(),
           isActive: z.boolean().optional(),
+          openapiUrl: httpUrl.optional().or(z.literal("")).or(z.null()),
+          manifestPath: z.string().max(500).optional().or(z.literal("")).or(z.null()),
+          authConfig: authConfigSchema.nullable().optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -212,7 +295,16 @@ export const appRouter = router({
         assertOwnerOrAdmin(target.userId, ctx.user);
         if (data.url) await assertSafeUrlInput(data.url);
         if (data.repoUrl) await assertSafeUrlInput(data.repoUrl, ["https:"]);
-        await updateTarget(id, data);
+        if (data.openapiUrl) await assertSafeUrlInput(data.openapiUrl);
+        if (data.authConfig && typeof data.authConfig === "object" && data.authConfig !== null && "loginCredentials" in data.authConfig) {
+          const lc = (data.authConfig as AuthScanConfig).loginCredentials;
+          if (lc) await assertSafeUrlInput(lc.loginUrl);
+        }
+        const patch: Record<string, unknown> = { ...data };
+        if (patch.openapiUrl === "") patch.openapiUrl = null;
+        if (patch.manifestPath === "") patch.manifestPath = null;
+        if (patch.repoUrl === "") patch.repoUrl = null;
+        await updateTarget(id, patch as any);
         return { success: true };
       }),
 
@@ -253,30 +345,13 @@ export const appRouter = router({
       .input(
         z.object({
           targetId: z.number(),
-          tools: toolList.default(["headers", "auth", "sqli", "xss"]),
+          tools: toolList.default([...LIGHT_DEFAULT_TOOLS]),
           scanMode: z.enum(["light", "full"]).default("light"),
-          authProfiles: z.array(z.object({
-            name: z.string().max(255),
-            type: z.enum(["none", "bearer", "basic"]),
-            token: z.string().max(8192).optional(),
-            username: z.string().max(255).optional(),
-            password: z.string().max(1024).optional(),
-          })).max(10).optional(),
-          authTests: z.object({
-            verticalEscalation: z.boolean().optional(),
-            horizontalEscalation: z.boolean().optional(),
-            sessionExpiry: z.boolean().optional(),
-            tokenReuse: z.boolean().optional(),
-          }).optional(),
-          manifestPath: z.string().max(255).optional(),
-          loginCredentials: z.object({
-            loginUrl: httpUrl,
-            username: z.string().max(255),
-            password: z.string().max(1024),
-            usernameField: z.string().max(255).optional(),
-            passwordField: z.string().max(255).optional(),
-            loginMethod: z.enum(["form", "json"]).optional(),
-          }).optional(),
+          authProfiles: z.array(authProfileSchema).max(10).optional(),
+          authTests: authTestsSchema.optional(),
+          manifestPath: z.string().max(500).optional(),
+          loginCredentials: loginCredentialsSchema.optional(),
+          useTargetAuthConfig: z.boolean().default(true),
         })
       )
       .mutation(async ({ ctx, input }) => {
@@ -296,13 +371,37 @@ export const appRouter = router({
           triggeredBy: "manual",
         });
 
+        const storedAuth = (target.authConfig ?? undefined) as AuthScanConfig | undefined;
         const authConfig: AuthScanConfig | undefined =
-          input.authProfiles ? { authProfiles: input.authProfiles, authTests: input.authTests } : undefined;
+          input.authProfiles
+            ? { authProfiles: input.authProfiles, authTests: input.authTests }
+            : input.useTargetAuthConfig
+              ? storedAuth
+              : undefined;
 
-        const loginCreds: LoginCredentials | undefined = input.loginCredentials;
+        const loginCreds: LoginCredentials | undefined =
+          input.loginCredentials ??
+          (input.useTargetAuthConfig ? storedAuth?.loginCredentials : undefined);
+
+        const manifestPath =
+          input.manifestPath ??
+          (target as Target & { manifestPath?: string | null }).manifestPath ??
+          undefined;
+        const openapiUrl = (target as Target & { openapiUrl?: string | null }).openapiUrl ?? undefined;
 
         setImmediate(() => {
-          runScan(scanId, target.id, target.url, input.tools, input.scanMode, authConfig, input.manifestPath, loginCreds, target.repoUrl ?? undefined).catch(console.error);
+          runScan(
+            scanId,
+            target.id,
+            target.url,
+            input.tools,
+            input.scanMode,
+            authConfig,
+            manifestPath ?? undefined,
+            loginCreds,
+            target.repoUrl ?? undefined,
+            openapiUrl ?? undefined
+          ).catch(console.error);
         });
 
         return { scanId, success: true };
@@ -344,44 +443,31 @@ export const appRouter = router({
         z.object({
           scanId: z.number(),
           dryRun: z.boolean().default(false),
-          integrations: z.object({
-            jira: z.object({
-              enabled: z.boolean(),
-              baseUrl: httpsUrl,
-              projectKey: z.string(),
-              apiToken: z.string(),
-              email: z.string(),
-              minSeverity: z.enum(["critical", "high", "medium", "low"]).default("medium"),
-              issueType: z.string().optional(),
-              labels: z.array(z.string()).optional(),
-              deduplication: z.boolean().optional(),
-              reopenResolved: z.boolean().optional(),
-            }).optional(),
-            github: z.object({
-              enabled: z.boolean(),
-              repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "repo must be owner/name"),
-              token: z.string(),
-              minSeverity: z.enum(["critical", "high", "medium", "low"]).default("high"),
-              labels: z.array(z.string()).optional(),
-            }).optional(),
-            linear: z.object({
-              enabled: z.boolean(),
-              apiKey: z.string(),
-              teamId: z.string(),
-              minSeverity: z.enum(["critical", "high", "medium", "low"]).default("high"),
-            }).optional(),
-          }),
+          useStored: z.boolean().default(true),
+          integrations: integrationsConfigSchema.optional(),
         })
       )
       .mutation(async ({ ctx, input }) => {
         const scan = await getScanById(input.scanId);
         if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
         assertOwnerOrAdmin(scan.userId, ctx.user);
-        if (input.integrations.jira?.enabled) await assertSafeUrlInput(input.integrations.jira.baseUrl, ["https:"]);
+
+        let config: IntegrationsConfig | undefined = input.integrations;
+        if (!config) {
+          const stored = await getIntegrationByUser(ctx.user.id);
+          if (!stored?.configEnc) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "No ticketing integrations configured. Save integrations first or pass integrations inline." });
+          }
+          config = decryptIntegrationsConfig(stored.configEnc);
+        }
+        if (!config) {
+          throw new TRPCError({ code: "BAD_REQUEST", message: "Integrations config required" });
+        }
+        if (config.jira?.enabled) await assertSafeUrlInput(config.jira.baseUrl, ["https:"]);
         const target = await getTargetById(scan.targetId);
         if (!target) throw new TRPCError({ code: "NOT_FOUND", message: "Target not found" });
         const findings = await getFindingsByScan(input.scanId);
-        const results = await pushFindingsToTicketing(input.integrations, findings, target.url, input.dryRun);
+        const results = await pushFindingsToTicketing(config, findings, target.url, input.dryRun);
         return {
           success: true,
           results,
@@ -392,6 +478,54 @@ export const appRouter = router({
             skipped: results.filter(r => r.action === "skipped").length,
           },
         };
+      }),
+
+    retestFinding: protectedProcedure
+      .input(z.object({ findingId: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const finding = await getFindingById(input.findingId);
+        if (!finding) throw new TRPCError({ code: "NOT_FOUND" });
+        const scan = await getScanById(finding.scanId);
+        if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+        assertOwnerOrAdmin(scan.userId, ctx.user);
+        const target = await getTargetById(scan.targetId);
+        if (!target) throw new TRPCError({ code: "NOT_FOUND" });
+
+        const tools = [finding.category.toLowerCase().includes("nuclei") ? "nuclei"
+          : finding.category.toLowerCase().includes("zap") ? "zap"
+          : finding.category.toLowerCase().includes("ssrf") ? "ssrf"
+          : finding.category.toLowerCase().includes("sql") ? "sqli"
+          : finding.category.toLowerCase().includes("xss") ? "xss"
+          : finding.category.toLowerCase().includes("header") ? "headers"
+          : finding.category.toLowerCase().includes("auth") ? "auth"
+          : "headers"];
+
+        const scanId = await createScan({
+          targetId: target.id,
+          userId: ctx.user.id,
+          status: "queued",
+          tools: tools.join(","),
+          scanMode: "light",
+          triggeredBy: "manual",
+        });
+
+        const storedAuth = (target.authConfig ?? undefined) as AuthScanConfig | undefined;
+        setImmediate(() => {
+          runScan(
+            scanId,
+            target.id,
+            target.url,
+            tools,
+            "light",
+            storedAuth,
+            (target as Target & { manifestPath?: string | null }).manifestPath ?? undefined,
+            storedAuth?.loginCredentials,
+            target.repoUrl ?? undefined,
+            (target as Target & { openapiUrl?: string | null }).openapiUrl ?? undefined
+          ).catch(console.error);
+        });
+
+        return { success: true, scanId, retestedFindingId: finding.id };
       }),
 
     recentFindings: protectedProcedure.query(async ({ ctx }) => {
@@ -515,7 +649,9 @@ export const appRouter = router({
         z.object({
           targetId: z.number(),
           cronExpression: z.string().min(1).max(100),
-          tools: toolList.default(["headers", "auth", "sqli", "xss"]),
+          tools: toolList.default([...LIGHT_DEFAULT_TOOLS]),
+          scanMode: z.enum(["light", "full"]).default("light"),
+          autoPushTicketing: z.boolean().default(false),
           enabled: z.boolean().default(true),
         })
       )
@@ -529,6 +665,8 @@ export const appRouter = router({
           userId: ctx.user.id,
           cronExpression: input.cronExpression,
           tools: input.tools.join(","),
+          scanMode: input.scanMode,
+          autoPushTicketing: input.autoPushTicketing,
           enabled: input.enabled,
         });
         return { success: true };
@@ -540,6 +678,8 @@ export const appRouter = router({
           id: z.number(),
           cronExpression: z.string().min(1).max(100).optional(),
           tools: toolList.optional(),
+          scanMode: z.enum(["light", "full"]).optional(),
+          autoPushTicketing: z.boolean().optional(),
           enabled: z.boolean().optional(),
         })
       )
@@ -583,14 +723,62 @@ export const appRouter = router({
     }),
   }),
 
+  // ─── Integrations ─────────────────────────────────────────────────────────
+  integrations: router({
+    get: protectedProcedure.query(async ({ ctx }) => {
+      const row = await getIntegrationByUser(ctx.user.id);
+      if (!row?.configEnc) return { configured: false, config: null as IntegrationsConfig | null };
+      try {
+        const config = redactIntegrationsConfig(decryptIntegrationsConfig(row.configEnc));
+        return { configured: true, config };
+      } catch {
+        return { configured: false, config: null };
+      }
+    }),
+
+    save: protectedProcedure
+      .input(z.object({ config: integrationsConfigSchema }))
+      .mutation(async ({ ctx, input }) => {
+        if (input.config.jira?.enabled) await assertSafeUrlInput(input.config.jira.baseUrl, ["https:"]);
+        // Merge secrets: if UI sent ******** keep previous secret
+        const existing = await getIntegrationByUser(ctx.user.id);
+        let merged = input.config as IntegrationsConfig;
+        if (existing?.configEnc) {
+          try {
+            const prev = decryptIntegrationsConfig(existing.configEnc);
+            if (merged.jira && merged.jira.apiToken === "********" && prev.jira) {
+              merged = { ...merged, jira: { ...merged.jira, apiToken: prev.jira.apiToken } };
+            }
+            if (merged.github && merged.github.token === "********" && prev.github) {
+              merged = { ...merged, github: { ...merged.github, token: prev.github.token } };
+            }
+            if (merged.linear && merged.linear.apiKey === "********" && prev.linear) {
+              merged = { ...merged, linear: { ...merged.linear, apiKey: prev.linear.apiKey } };
+            }
+          } catch { /* ignore */ }
+        }
+        const enc = encryptIntegrationsConfig(merged);
+        await upsertIntegration(ctx.user.id, enc);
+        return { success: true };
+      }),
+
+    delete: protectedProcedure.mutation(async ({ ctx }) => {
+      await deleteIntegration(ctx.user.id);
+      return { success: true };
+    }),
+  }),
+
   // ─── CI/CD Pipeline ───────────────────────────────────────────────────────
   cicd: router({
     scan: publicProcedure
       .input(z.object({
         targetUrl: httpUrl,
-        tools: toolList.default(["headers", "auth", "sqli", "xss", "recon"]),
+        tools: toolList.default([...LIGHT_DEFAULT_TOOLS]),
         scanMode: z.enum(["light", "full"]).default("light"),
-        failOn: z.enum(["critical", "high", "medium", "low"]).default("high"),
+        /** Preferred alias */
+        failOnSeverity: z.enum(["critical", "high", "medium", "low"]).optional(),
+        /** Backward-compatible alias */
+        failOn: z.enum(["critical", "high", "medium", "low"]).optional(),
         apiKey: z.string().min(1).max(512),
       }))
       .mutation(async ({ input }) => {
@@ -602,8 +790,8 @@ export const appRouter = router({
 
         const ciUserId = 0;
         const ciTargetId = 0;
+        const failThreshold = input.failOnSeverity ?? input.failOn ?? "high";
 
-        const allFindings: Array<{ category: string; severity: string; title: string; cvssScore?: number | null }> = [];
         const { runScan: runScanFn } = await import("./scanEngine");
         const { createScan: createScanFn, getScanById: getScanByIdFn, getFindingsByScan: getFindingsByIdFn } = await import("./db");
 
@@ -621,21 +809,31 @@ export const appRouter = router({
         const findings = await getFindingsByIdFn(scanId);
 
         const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-        const threshold = severityOrder[input.failOn] ?? 1;
+        const threshold = severityOrder[failThreshold] ?? 1;
         const failFindings = findings.filter((f) => (severityOrder[f.severity] ?? 4) <= threshold);
-        const pass = failFindings.length === 0;
+        const passed = failFindings.length === 0;
+        const grade = (() => { const s = scan?.securityScore ?? 0; return s >= 90 ? "A" : s >= 80 ? "B" : s >= 70 ? "C" : s >= 55 ? "D" : "F"; })();
 
         return {
-          pass,
-          exitCode: pass ? 0 : 1,
+          pass: passed,
+          passed,
+          exitCode: passed ? 0 : 1,
           scanId,
           targetUrl: input.targetUrl,
           securityScore: scan?.securityScore ?? 0,
-          securityGrade: (() => { const s = scan?.securityScore ?? 0; return s >= 90 ? "A" : s >= 80 ? "B" : s >= 70 ? "C" : s >= 55 ? "D" : "F"; })(),
+          securityGrade: grade,
           riskLevel: scan?.riskLevel ?? "unknown",
-          threshold: input.failOn,
+          threshold: failThreshold,
+          failOnSeverity: failThreshold,
           totalFindings: findings.length,
           failingFindings: failFindings.length,
+          counts: {
+            critical: findings.filter((f) => f.severity === "critical").length,
+            high: findings.filter((f) => f.severity === "high").length,
+            medium: findings.filter((f) => f.severity === "medium").length,
+            low: findings.filter((f) => f.severity === "low").length,
+            info: findings.filter((f) => f.severity === "info").length,
+          },
           bySeverity: {
             critical: findings.filter((f) => f.severity === "critical").length,
             high: findings.filter((f) => f.severity === "high").length,
@@ -643,6 +841,7 @@ export const appRouter = router({
             low: findings.filter((f) => f.severity === "low").length,
             info: findings.filter((f) => f.severity === "info").length,
           },
+          findingIds: failFindings.map((f) => f.id),
           findings: findings.map((f) => ({
             id: f.id,
             title: f.title,
@@ -652,7 +851,7 @@ export const appRouter = router({
             cweId: f.cweId,
             recommendation: f.recommendation,
           })),
-          summary: `${pass ? "PASS" : "FAIL"} — ${findings.length} finding(s), ${failFindings.length} at or above ${input.failOn} severity. Score: ${scan?.securityScore ?? 0}/100 (Grade ${(() => { const s = scan?.securityScore ?? 0; return s >= 90 ? "A" : s >= 80 ? "B" : s >= 70 ? "C" : s >= 55 ? "D" : "F"; })()}).`,
+          summary: `${passed ? "PASS" : "FAIL"} — ${findings.length} finding(s), ${failFindings.length} at or above ${failThreshold} severity. Score: ${scan?.securityScore ?? 0}/100 (Grade ${grade}).`,
         };
       }),
   }),

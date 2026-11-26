@@ -69,6 +69,10 @@ async function startServer() {
 
   server.listen(port, () => {
     console.log(`Server running on http://localhost:${port}/`);
+    // Start schedule runner after listen so DB/light migrations are ready
+    import("../scheduleRunner")
+      .then(({ startScheduleRunner }) => startScheduleRunner(60_000))
+      .catch((err) => console.warn("[Startup] schedule runner failed to start:", err?.message || err));
   });
 }
 

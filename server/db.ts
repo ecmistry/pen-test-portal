@@ -1,6 +1,7 @@
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
+  InsertIntegration,
   InsertReport,
   InsertScan,
   InsertScanFinding,
@@ -8,6 +9,7 @@ import {
   InsertSchedule,
   InsertTarget,
   InsertUser,
+  integrations,
   reports,
   scanFindings,
   scanLogs,
@@ -46,9 +48,25 @@ async function applyLightMigrations(db: ReturnType<typeof drizzle>) {
   await safeAlter("ALTER TABLE scan_findings ADD COLUMN sourceLine INT DEFAULT NULL");
   await safeAlter("ALTER TABLE scan_findings ADD COLUMN sourceSnippet TEXT DEFAULT NULL");
   await safeAlter("ALTER TABLE targets ADD COLUMN repoUrl VARCHAR(2048) DEFAULT NULL");
+  await safeAlter("ALTER TABLE targets ADD COLUMN authConfig JSON DEFAULT NULL");
+  await safeAlter("ALTER TABLE targets ADD COLUMN openapiUrl VARCHAR(2048) DEFAULT NULL");
+  await safeAlter("ALTER TABLE targets ADD COLUMN manifestPath VARCHAR(500) DEFAULT NULL");
+  await safeAlter("ALTER TABLE schedules ADD COLUMN scanMode VARCHAR(20) DEFAULT 'light' NOT NULL");
+  await safeAlter("ALTER TABLE schedules ADD COLUMN autoPushTicketing BOOLEAN DEFAULT FALSE NOT NULL");
   await safeAlter("ALTER TABLE reports MODIFY markdownContent MEDIUMTEXT");
   await safeAlter("ALTER TABLE reports MODIFY executiveSummary MEDIUMTEXT");
   await safeAlter("ALTER TABLE reports MODIFY complianceNotes MEDIUMTEXT");
+  try {
+    await db.execute(sql.raw(`
+      CREATE TABLE IF NOT EXISTS integrations (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        userId INT NOT NULL UNIQUE,
+        configEnc TEXT NOT NULL,
+        createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updatedAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `));
+  } catch { /* table may exist */ }
 }
 
 // ─── Users ────────────────────────────────────────────────────────────────────
@@ -424,4 +442,30 @@ export async function getScanTrends(userId: number, isAdmin: boolean, days = 30)
     .orderBy(sql`DATE(${scans.createdAt})`);
 
   return rows;
+}
+
+// ─── Integrations ─────────────────────────────────────────────────────────────
+export async function getIntegrationByUser(userId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(integrations).where(eq(integrations.userId, userId)).limit(1);
+  return result[0];
+}
+
+export async function upsertIntegration(userId: number, configEnc: string) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  const existing = await getIntegrationByUser(userId);
+  if (existing) {
+    await db.update(integrations).set({ configEnc }).where(eq(integrations.userId, userId));
+    return existing.id;
+  }
+  const result = await db.insert(integrations).values({ userId, configEnc } satisfies InsertIntegration);
+  return (result as any)[0]?.insertId as number;
+}
+
+export async function deleteIntegration(userId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  await db.delete(integrations).where(eq(integrations.userId, userId));
 }

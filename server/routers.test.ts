@@ -8,11 +8,18 @@ const mockDb = vi.hoisted(() => {
     "getLogsByScan", "getRecentFindingsByUser", "getReportByScan", "getReportsByUser", "getScanById",
     "getScanTrends", "getScansByTarget", "getScansByUser", "getScheduleById", "getSchedulesByUser", "getTargetById",
     "getTargetsByUser", "updateFindingStatus", "updateSchedule", "updateTarget", "updateUserRole",
+    "getIntegrationByUser", "upsertIntegration", "deleteIntegration", "getAllSchedules",
   ];
   return Object.fromEntries(names.map((n) => [n, vi.fn()]));
 });
 
 vi.mock("./db", () => mockDb);
+
+vi.mock("./integrationsCrypto", () => ({
+  encryptIntegrationsConfig: vi.fn((c) => JSON.stringify(c)),
+  decryptIntegrationsConfig: vi.fn((s) => JSON.parse(s)),
+  redactIntegrationsConfig: vi.fn((c) => c),
+}));
 
 vi.mock("./scanEngine", async (importOriginal) => {
   const actual = await importOriginal() as Record<string, unknown>;

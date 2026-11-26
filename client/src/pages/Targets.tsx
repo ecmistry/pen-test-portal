@@ -1,4 +1,5 @@
 import AppLayout from "@/components/AppLayout";
+import ToolPicker from "@/components/ToolPicker";
 import { trpc } from "@/lib/trpc";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,8 +11,9 @@ import { toast } from "sonner";
 import { useState } from "react";
 import { useLocation } from "wouter";
 import {
-  Plus, Target, Edit2, Trash2, Play, Clock, ExternalLink, Lock,
+  Plus, Target, Edit2, Trash2, Play, Clock, ExternalLink, Lock, Settings2,
 } from "lucide-react";
+import { LIGHT_DEFAULT_TOOLS } from "@shared/scanTools";
 
 function StatusDot({ isActive }: { isActive: boolean }) {
   return (
@@ -23,6 +25,8 @@ interface TargetFormData {
   name: string;
   url: string;
   repoUrl: string;
+  openapiUrl: string;
+  manifestPath: string;
   description: string;
   tags: string;
   scanFrequency: "manual" | "daily" | "weekly" | "monthly";
@@ -32,10 +36,21 @@ const defaultForm: TargetFormData = {
   name: "",
   url: "",
   repoUrl: "",
+  openapiUrl: "",
+  manifestPath: "",
   description: "",
   tags: "",
   scanFrequency: "manual",
 };
+
+interface AuthProfileForm {
+  name: string;
+  type: "none" | "bearer" | "basic";
+  token: string;
+  username: string;
+  password: string;
+  privilegeRank: number;
+}
 
 interface AuthScanForm {
   loginUrl: string;
@@ -45,6 +60,12 @@ interface AuthScanForm {
   passwordField: string;
   loginMethod: "form" | "json";
   scanMode: "light" | "full";
+  saveToTarget: boolean;
+  verticalEscalation: boolean;
+  horizontalEscalation: boolean;
+  sessionExpiry: boolean;
+  tokenReuse: boolean;
+  profiles: AuthProfileForm[];
 }
 
 const defaultAuthForm: AuthScanForm = {
@@ -55,6 +76,12 @@ const defaultAuthForm: AuthScanForm = {
   passwordField: "password",
   loginMethod: "json",
   scanMode: "full",
+  saveToTarget: true,
+  verticalEscalation: true,
+  horizontalEscalation: true,
+  sessionExpiry: false,
+  tokenReuse: true,
+  profiles: [],
 };
 
 export default function Targets() {
@@ -101,6 +128,9 @@ export default function Targets() {
   const [authScanTarget, setAuthScanTarget] = useState<any>(null);
   const [authForm, setAuthForm] = useState<AuthScanForm>(defaultAuthForm);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [customScanTarget, setCustomScanTarget] = useState<any>(null);
+  const [customTools, setCustomTools] = useState<string[]>([...LIGHT_DEFAULT_TOOLS]);
+  const [customMode, setCustomMode] = useState<"light" | "full">("light");
 
   function openEdit(t: any) {
     setEditTarget(t);
@@ -108,6 +138,8 @@ export default function Targets() {
       name: t.name,
       url: t.url,
       repoUrl: t.repoUrl || "",
+      openapiUrl: t.openapiUrl || "",
+      manifestPath: t.manifestPath || "",
       description: t.description || "",
       tags: t.tags || "",
       scanFrequency: t.scanFrequency,
@@ -128,7 +160,12 @@ export default function Targets() {
       toast.error("Name and URL are required");
       return;
     }
-    const payload = { ...form, repoUrl: form.repoUrl || undefined };
+    const payload = {
+      ...form,
+      repoUrl: form.repoUrl || undefined,
+      openapiUrl: form.openapiUrl || undefined,
+      manifestPath: form.manifestPath || undefined,
+    };
     if (editTarget) {
       updateMutation.mutate({ id: editTarget.id, ...payload });
     } else {
@@ -145,18 +182,46 @@ export default function Targets() {
       toast.error("Login URL is required");
       return;
     }
+    const authProfiles = authForm.profiles
+      .filter((p) => p.name.trim())
+      .map((p) => ({
+        name: p.name,
+        type: p.type,
+        token: p.token || undefined,
+        username: p.username || undefined,
+        password: p.password || undefined,
+        privilegeRank: p.privilegeRank,
+      }));
+    const authTests = {
+      verticalEscalation: authForm.verticalEscalation,
+      horizontalEscalation: authForm.horizontalEscalation,
+      sessionExpiry: authForm.sessionExpiry,
+      tokenReuse: authForm.tokenReuse,
+    };
+    const loginCredentials = {
+      loginUrl: authForm.loginUrl,
+      username: authForm.username,
+      password: authForm.password,
+      usernameField: authForm.usernameField || "username",
+      passwordField: authForm.passwordField || "password",
+      loginMethod: authForm.loginMethod,
+    };
+
+    if (authForm.saveToTarget) {
+      updateMutation.mutate({
+        id: authScanTarget.id,
+        authConfig: { authProfiles, authTests, loginCredentials },
+      });
+    }
+
     startScanMutation.mutate({
       targetId: authScanTarget.id,
-      tools: ["headers", "auth", "sqli", "xss", "recon"],
+      tools: [...LIGHT_DEFAULT_TOOLS, "auth-roles"],
       scanMode: authForm.scanMode,
-      loginCredentials: {
-        loginUrl: authForm.loginUrl,
-        username: authForm.username,
-        password: authForm.password,
-        usernameField: authForm.usernameField || "username",
-        passwordField: authForm.passwordField || "password",
-        loginMethod: authForm.loginMethod,
-      },
+      authProfiles: authProfiles.length ? authProfiles : undefined,
+      authTests,
+      loginCredentials,
+      useTargetAuthConfig: false,
     });
   }
 
@@ -267,8 +332,9 @@ export default function Targets() {
                       onClick={() =>
                         startScanMutation.mutate({
                           targetId: t.id,
-                          tools: ["headers", "auth", "sqli", "xss", "recon"],
+                          tools: [...LIGHT_DEFAULT_TOOLS],
                           scanMode: "light",
+                          manifestPath: t.manifestPath || undefined,
                         })
                       }
                       disabled={startScanMutation.isPending}
@@ -284,8 +350,9 @@ export default function Targets() {
                       onClick={() =>
                         startScanMutation.mutate({
                           targetId: t.id,
-                          tools: ["headers", "auth", "sqli", "xss", "recon"],
+                          tools: [...LIGHT_DEFAULT_TOOLS],
                           scanMode: "full",
+                          manifestPath: t.manifestPath || undefined,
                         })
                       }
                       disabled={startScanMutation.isPending}
@@ -295,6 +362,20 @@ export default function Targets() {
                       Full Scan
                     </Button>
                   </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="w-full border-border text-foreground gap-1.5"
+                    onClick={() => {
+                      setCustomScanTarget(t);
+                      setCustomTools([...LIGHT_DEFAULT_TOOLS]);
+                      setCustomMode("light");
+                    }}
+                    disabled={startScanMutation.isPending}
+                  >
+                    <Settings2 className="w-3.5 h-3.5" />
+                    Custom Tools
+                  </Button>
                   <Button
                     size="sm"
                     variant="outline"
@@ -357,6 +438,24 @@ export default function Targets() {
               <p className="text-xs text-muted-foreground mt-1">Git repository URL to enable source code analysis (Semgrep). Leave blank to skip SAST.</p>
             </div>
             <div>
+              <Label className="text-foreground text-sm mb-1.5 block">OpenAPI URL <span className="text-muted-foreground font-normal">(API inventory)</span></Label>
+              <Input
+                placeholder="https://example.com/openapi.json"
+                value={form.openapiUrl}
+                onChange={(e) => setForm({ ...form, openapiUrl: e.target.value })}
+                className="bg-input border-border text-foreground placeholder:text-muted-foreground"
+              />
+            </div>
+            <div>
+              <Label className="text-foreground text-sm mb-1.5 block">SCA manifest path <span className="text-muted-foreground font-normal">(server path)</span></Label>
+              <Input
+                placeholder="/path/to/package-lock.json"
+                value={form.manifestPath}
+                onChange={(e) => setForm({ ...form, manifestPath: e.target.value })}
+                className="bg-input border-border text-foreground placeholder:text-muted-foreground"
+              />
+            </div>
+            <div>
               <Label className="text-foreground text-sm mb-1.5 block">Description</Label>
               <Input
                 placeholder="Brief description of the application"
@@ -375,7 +474,7 @@ export default function Targets() {
               />
             </div>
             <div>
-              <Label className="text-foreground text-sm mb-1.5 block">Scan Frequency</Label>
+              <Label className="text-foreground text-sm mb-1.5 block">Scan Frequency <span className="text-muted-foreground font-normal">(informational — use Schedules to run)</span></Label>
               <Select value={form.scanFrequency} onValueChange={(v: any) => setForm({ ...form, scanFrequency: v })}>
                 <SelectTrigger className="bg-input border-border text-foreground">
                   <SelectValue />
@@ -404,13 +503,55 @@ export default function Targets() {
         </DialogContent>
       </Dialog>
 
+      {/* Custom tools scan */}
+      <Dialog open={!!customScanTarget} onOpenChange={(o) => { if (!o) setCustomScanTarget(null); }}>
+        <DialogContent className="bg-card border-border text-foreground max-w-2xl max-h-[90vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Custom Scan — {customScanTarget?.name}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-2">
+            <div>
+              <Label className="text-sm mb-1.5 block">Mode</Label>
+              <Select value={customMode} onValueChange={(v: "light" | "full") => setCustomMode(v)}>
+                <SelectTrigger className="bg-input border-border text-foreground">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent className="bg-card border-border text-foreground">
+                  <SelectItem value="light">Light</SelectItem>
+                  <SelectItem value="full">Full (adds advanced tools automatically)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <ToolPicker selected={customTools} onChange={setCustomTools} />
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setCustomScanTarget(null)}>Cancel</Button>
+            <Button
+              onClick={() => {
+                if (!customScanTarget || customTools.length === 0) return;
+                startScanMutation.mutate({
+                  targetId: customScanTarget.id,
+                  tools: customTools,
+                  scanMode: customMode,
+                  manifestPath: customScanTarget.manifestPath || undefined,
+                });
+                setCustomScanTarget(null);
+              }}
+              disabled={startScanMutation.isPending}
+            >
+              Start Scan
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* Authenticated Scan Dialog */}
       <Dialog open={!!authScanTarget} onOpenChange={(o) => { if (!o) setAuthScanTarget(null); }}>
-        <DialogContent className="bg-card border-border text-foreground max-w-md">
+        <DialogContent className="bg-card border-border text-foreground max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               <Lock className="w-4 h-4 text-cyan-500" />
-              Authenticated Scan
+              Authenticated / Multi-Role Scan
             </DialogTitle>
           </DialogHeader>
           {authScanTarget && (
@@ -428,7 +569,6 @@ export default function Targets() {
                   onChange={(e) => setAuthForm({ ...authForm, loginUrl: e.target.value })}
                   className="bg-input border-border text-foreground placeholder:text-muted-foreground"
                 />
-                <p className="text-xs text-muted-foreground mt-1">The URL where the login form or API endpoint is located</p>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -483,7 +623,7 @@ export default function Targets() {
               </div>
 
               <div className="flex items-center justify-between">
-                <Label className="text-foreground text-sm">Advanced Options</Label>
+                <Label className="text-foreground text-sm">Advanced field names</Label>
                 <Switch checked={showAdvanced} onCheckedChange={setShowAdvanced} />
               </div>
 
@@ -507,11 +647,127 @@ export default function Targets() {
                       className="bg-input border-border text-foreground placeholder:text-muted-foreground text-sm h-8"
                     />
                   </div>
-                  <p className="col-span-2 text-xs text-muted-foreground">
-                    Field names used in the login request body (e.g. "email" instead of "username")
-                  </p>
                 </div>
               )}
+
+              <div className="space-y-2 border border-border/50 rounded-lg p-3">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm text-foreground">Extra auth profiles (multi-role)</Label>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      setAuthForm({
+                        ...authForm,
+                        profiles: [
+                          ...authForm.profiles,
+                          { name: "standard_user", type: "bearer", token: "", username: "", password: "", privilegeRank: 2 },
+                        ],
+                      })
+                    }
+                  >
+                    Add profile
+                  </Button>
+                </div>
+                {authForm.profiles.map((p, idx) => (
+                  <div key={idx} className="grid grid-cols-2 gap-2 border-t border-border/40 pt-2">
+                    <Input
+                      placeholder="name"
+                      value={p.name}
+                      onChange={(e) => {
+                        const profiles = [...authForm.profiles];
+                        profiles[idx] = { ...p, name: e.target.value };
+                        setAuthForm({ ...authForm, profiles });
+                      }}
+                      className="bg-input border-border text-sm h-8"
+                    />
+                    <Select
+                      value={p.type}
+                      onValueChange={(v: any) => {
+                        const profiles = [...authForm.profiles];
+                        profiles[idx] = { ...p, type: v };
+                        setAuthForm({ ...authForm, profiles });
+                      }}
+                    >
+                      <SelectTrigger className="bg-input border-border h-8 text-sm"><SelectValue /></SelectTrigger>
+                      <SelectContent className="bg-card border-border">
+                        <SelectItem value="bearer">Bearer</SelectItem>
+                        <SelectItem value="basic">Basic</SelectItem>
+                        <SelectItem value="none">None</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    {p.type === "bearer" ? (
+                      <Input
+                        placeholder="token"
+                        value={p.token}
+                        onChange={(e) => {
+                          const profiles = [...authForm.profiles];
+                          profiles[idx] = { ...p, token: e.target.value };
+                          setAuthForm({ ...authForm, profiles });
+                        }}
+                        className="bg-input border-border text-sm h-8 col-span-2"
+                      />
+                    ) : p.type === "basic" ? (
+                      <>
+                        <Input placeholder="username" value={p.username} onChange={(e) => {
+                          const profiles = [...authForm.profiles];
+                          profiles[idx] = { ...p, username: e.target.value };
+                          setAuthForm({ ...authForm, profiles });
+                        }} className="bg-input border-border text-sm h-8" />
+                        <Input placeholder="password" type="password" value={p.password} onChange={(e) => {
+                          const profiles = [...authForm.profiles];
+                          profiles[idx] = { ...p, password: e.target.value };
+                          setAuthForm({ ...authForm, profiles });
+                        }} className="bg-input border-border text-sm h-8" />
+                      </>
+                    ) : null}
+                    <div className="col-span-2 flex items-center gap-2">
+                      <Label className="text-xs text-muted-foreground">Rank 0–4</Label>
+                      <Input
+                        type="number"
+                        min={0}
+                        max={4}
+                        value={p.privilegeRank}
+                        onChange={(e) => {
+                          const profiles = [...authForm.profiles];
+                          profiles[idx] = { ...p, privilegeRank: Number(e.target.value) };
+                          setAuthForm({ ...authForm, profiles });
+                        }}
+                        className="bg-input border-border text-sm h-8 w-20"
+                      />
+                      <Button type="button" size="sm" variant="ghost" className="text-red-400" onClick={() => {
+                        setAuthForm({ ...authForm, profiles: authForm.profiles.filter((_, i) => i !== idx) });
+                      }}>Remove</Button>
+                    </div>
+                  </div>
+                ))}
+                <div className="grid grid-cols-2 gap-2 text-xs pt-2">
+                  {[
+                    ["verticalEscalation", "Vertical escalation"],
+                    ["horizontalEscalation", "Horizontal / IDOR"],
+                    ["tokenReuse", "Token reuse after logout"],
+                    ["sessionExpiry", "Session cache checks"],
+                  ].map(([key, label]) => (
+                    <label key={key} className="flex items-center gap-2 text-muted-foreground">
+                      <input
+                        type="checkbox"
+                        checked={(authForm as any)[key]}
+                        onChange={(e) => setAuthForm({ ...authForm, [key]: e.target.checked } as AuthScanForm)}
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </div>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={authForm.saveToTarget}
+                    onChange={(e) => setAuthForm({ ...authForm, saveToTarget: e.target.checked })}
+                  />
+                  Save auth config on target (for schedules)
+                </label>
+              </div>
             </div>
           )}
           <DialogFooter>

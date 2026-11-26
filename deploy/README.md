@@ -99,3 +99,23 @@ The portal detects each tool at scan time; if missing, that phase is skipped and
 ## Login
 
 With `DEV_BYPASS_AUTH=true` and `VITE_DEV_LOGIN=true` in `.env`, use **Dev Login** on the portal to sign in without OAuth. For production OAuth, set `VITE_APP_ID`, `OAUTH_SERVER_URL`, and `VITE_OAUTH_PORTAL_URL` and switch off the dev bypass.
+
+## CI/CD severity gates
+
+Set `CICD_API_KEY` in `.env`. Call the tRPC mutation `cicd.scan` (HTTP POST to `/api/trpc/cicd.scan`) with JSON body:
+
+```bash
+# Example using curl + superjson-unaware raw tRPC batch style is app-specific;
+# preferred: use your CI job to call the portal's tRPC client, or:
+curl -sS -X POST "https://ghoststrike.tech/api/trpc/cicd.scan" \
+  -H "Content-Type: application/json" \
+  -d '{"json":{"targetUrl":"https://app.example.com","scanMode":"light","failOnSeverity":"high","apiKey":"'"$CICD_API_KEY"'"}}'
+```
+
+Response includes `passed` / `exitCode` (0|1), `counts`, and `findingIds`. Fail the GitHub Actions step when `exitCode !== 0`.
+
+Optional: set `OOB_CALLBACK_BASE` (e.g. Interactsh / OAST host) for confirmed out-of-band SSRF detection.
+
+## Schedules
+
+Enabled schedules are evaluated every minute by the in-process schedule runner. Configure tools, scan mode, and optional auto-push to ticketing on the Schedules page. Target `scanFrequency` is informational only — create a Schedule to run scans.

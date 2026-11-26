@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   LogOut,
   Menu,
+  Plug,
   Settings,
   Target,
   Users,
@@ -24,6 +25,7 @@ const navItems = [
   { path: "/scans", label: "Scans", icon: Zap },
   { path: "/schedules", label: "Schedules", icon: Clock },
   { path: "/reports", label: "Reports", icon: FileText },
+  { path: "/integrations", label: "Integrations", icon: Plug },
   { path: "/methodology", label: "Methodology", icon: BookOpen },
 ];
 

@@ -173,6 +173,8 @@ export interface AuthProfile {
   token?: string;
   username?: string;
   password?: string;
+  /** Explicit privilege rank (0=anon … 4=admin). Overrides name heuristics when set. */
+  privilegeRank?: number;
 }
 
 export interface AuthTestConfig {
@@ -182,11 +184,6 @@ export interface AuthTestConfig {
   tokenReuse?: boolean;
 }
 
-export interface AuthScanConfig {
-  authProfiles?: AuthProfile[];
-  authTests?: AuthTestConfig;
-}
-
 export interface LoginCredentials {
   loginUrl: string;
   username: string;
@@ -194,6 +191,13 @@ export interface LoginCredentials {
   usernameField?: string;
   passwordField?: string;
   loginMethod?: "form" | "json";
+}
+
+export interface AuthScanConfig {
+  authProfiles?: AuthProfile[];
+  authTests?: AuthTestConfig;
+  /** Optional nested login for scheduled scans */
+  loginCredentials?: LoginCredentials;
 }
 
 /** Build Authorization header from a profile */
@@ -213,6 +217,9 @@ export function buildAuthHeader(profile: AuthProfile): Record<string, string> {
 
 /** Determine the privilege rank for ordering: higher = more privileged */
 export function profilePrivilegeRank(profile: AuthProfile): number {
+  if (typeof profile.privilegeRank === "number" && Number.isFinite(profile.privilegeRank)) {
+    return Math.max(0, Math.min(4, Math.floor(profile.privilegeRank)));
+  }
   const name = profile.name.toLowerCase();
   if (name === "anonymous" || profile.type === "none") return 0;
   if (name.includes("read") || name.includes("viewer")) return 1;
@@ -220,6 +227,23 @@ export function profilePrivilegeRank(profile: AuthProfile): number {
   if (name.includes("editor") || name.includes("manager")) return 3;
   if (name.includes("admin") || name.includes("superadmin") || name.includes("root")) return 4;
   return 2; // default to standard user level
+}
+
+/** Deduplicate near-identical findings (same title+category+severity, or same CWE+URL). */
+export function dedupeFindings<T extends Pick<Finding, "title" | "category" | "severity" | "cweId" | "affectedUrl">>(
+  findings: T[]
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const f of findings) {
+    const keyA = `${f.category}|${f.severity}|${f.title}`.toLowerCase();
+    const keyB = `${f.cweId ?? ""}|${f.affectedUrl ?? ""}|${f.title}`.toLowerCase();
+    if (seen.has(keyA) || (f.cweId && f.affectedUrl && seen.has(keyB))) continue;
+    seen.add(keyA);
+    if (f.cweId && f.affectedUrl) seen.add(keyB);
+    out.push(f);
+  }
+  return out;
 }
 
 type LogLevel = "info" | "warn" | "error" | "success" | "debug";
@@ -518,14 +542,14 @@ async function testSecurityHeaders(scanId: number, targetUrl: string, cookies?: 
             });
           } else if (scriptUsesNonce) {
             // Strong script protection; style exceptions are lower risk — skip or downgrade
-          } else if (hasStyleAttrUnsafe) {
+          } else if (hasStyleAttrUnsafe && !hasStyleSrcUnsafe) {
             findings.push({
               category: "Security Headers",
-              severity: "low",
+              severity: "info",
               title: "Content-Security-Policy style-src-attr contains unsafe-inline",
               description: "style-src-attr allows inline styles. Script execution is protected; style injection only. Some third-party widgets require this.",
               evidence: `CSP value: ${value.substring(0, 200)}`,
-              recommendation: "Use nonces for style-src-elem where possible. style-src-attr 'unsafe-inline' may be required by widgets.",
+              recommendation: "Prefer nonces for style-src-elem. style-src-attr 'unsafe-inline' is often acceptable for widget compatibility.",
               cweId: "CWE-693",
               owaspCategory: "A05:2021 – Security Misconfiguration",
               affectedUrl: targetUrl,
@@ -536,9 +560,9 @@ async function testSecurityHeaders(scanId: number, targetUrl: string, cookies?: 
               category: "Security Headers",
               severity: "low",
               title: "Content-Security-Policy style-src contains unsafe-inline",
-              description: "style-src allows inline styles. Script execution is protected; this is lower risk.",
+              description: "style-src allows inline styles. Prefer splitting style-src-elem / style-src-attr so only attributes remain permissive when widgets require it.",
               evidence: `CSP value: ${value.substring(0, 200)}`,
-              recommendation: "Consider using nonces for style-src-elem. style-src-attr 'unsafe-inline' may be required by some widgets.",
+              recommendation: "Use nonces for style-src-elem. Prefer style-src-attr 'unsafe-inline' only when required by widgets.",
               cweId: "CWE-693",
               owaspCategory: "A05:2021 – Security Misconfiguration",
               affectedUrl: targetUrl,
@@ -697,11 +721,17 @@ async function testAuthentication(scanId: number, targetUrl: string, scanMode: S
       const endpointNote = loginConfig
         ? `Tested: POST ${testEndpoint} with Content-Type: application/json (endpoint discovered via probe)`
         : `Tested: POST ${testEndpoint} with Content-Type: application/json (no standard login endpoint found — used fallback)`;
+      // Downgrade when login endpoint was not confidently discovered (SPA/API FP risk)
+      const severity = loginConfig ? "high" : "info";
       findings.push({
         category: "Authentication",
-        severity: "high",
-        title: "No brute force protection detected",
-        description: `The application does not appear to lock accounts or rate-limit after multiple failed login attempts. ${endpointNote}. If the scanner did not test the real login endpoint, this may be a false positive — configure the target's login URL for accurate results.`,
+        severity,
+        title: loginConfig
+          ? "No brute force protection detected"
+          : "Brute force protection inconclusive — login endpoint not confirmed",
+        description: loginConfig
+          ? `The application does not appear to lock accounts or rate-limit after multiple failed login attempts. ${endpointNote}.`
+          : `Could not confirm a real login endpoint, so brute-force protection was not asserted at high severity. ${endpointNote}. Configure the target's login URL for accurate results.`,
         evidence: `${bruteForceAttempts} consecutive failed login attempts to POST ${testEndpoint} did not trigger lockout or rate limiting (no 429, Retry-After, or X-RateLimit-Remaining: 0).`,
         recommendation: "Implement account lockout after 3-5 failed attempts, rate limiting (e.g. 5 attempts per 15 minutes), and consider CAPTCHA. If the scanner tested a non-login path, configure the correct login endpoint in the target settings.",
         cweId: "CWE-307",
@@ -709,7 +739,7 @@ async function testAuthentication(scanId: number, targetUrl: string, scanMode: S
         affectedUrl: `${targetUrl}${testEndpoint}`,
         affectedComponent: "Login / Authentication Endpoint",
       });
-      await log(scanId, "warn", `No brute force protection detected (tested: POST ${testEndpoint})`, "auth");
+      await log(scanId, "warn", `No brute force protection detected (tested: POST ${testEndpoint}, severity=${severity})`, "auth");
     }
   } catch (err: any) {
     await log(scanId, "info", `Brute force test skipped: ${err.message}`, "auth");
@@ -1516,6 +1546,30 @@ const SSRF_PAYLOADS = [
   { payload: "http://2130706433", name: "decimal localhost" },
 ];
 
+/** Optional OOB callback base (e.g. https://xyz.oast.fun or interactsh). When set, SSRF uses unique callbacks. */
+export function getOobCallbackBase(): string | undefined {
+  const base = process.env.OOB_CALLBACK_BASE?.trim();
+  return base || undefined;
+}
+
+async function pollOobHit(callbackId: string, oobBase: string): Promise<boolean> {
+  // Convention: OOB_CALLBACK_BASE host supports GET {base}/poll?id={id} returning JSON { hit: true }
+  try {
+    const pollUrl = new URL(oobBase.includes("://") ? oobBase : `https://${oobBase}`);
+    pollUrl.pathname = "/poll";
+    pollUrl.searchParams.set("id", callbackId);
+    const res = await fetch(pollUrl.toString(), {
+      headers: { Accept: "application/json", "User-Agent": "PenTestPortal/1.0" },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return false;
+    const data = (await res.json().catch(() => null)) as { hit?: boolean } | null;
+    return !!data?.hit;
+  } catch {
+    return false;
+  }
+}
+
 /** Test for Server-Side Request Forgery (SSRF) vulnerabilities */
 export async function testSSRF(scanId: number, targetUrl: string, cookies?: string): Promise<Finding[]> {
   const findings: Finding[] = [];
@@ -1525,6 +1579,50 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
   if (!baseResp) {
     await log(scanId, "warn", "Target not reachable for SSRF testing", "ssrf");
     return findings;
+  }
+
+  const oobBase = getOobCallbackBase();
+  if (oobBase) {
+    await log(scanId, "info", `OOB SSRF callbacks enabled via OOB_CALLBACK_BASE`, "ssrf");
+    const host = oobBase.replace(/^https?:\/\//, "").replace(/\/$/, "");
+    for (const param of SSRF_PARAMS.slice(0, 4)) {
+      const callbackId = `gs-${scanId}-${param}-${Date.now().toString(36)}`;
+      const payload = `http://${callbackId}.${host}`;
+      try {
+        const path = `/?${param}=${encodeURIComponent(payload)}`;
+        await httpGet(targetUrl, path, { timeout: 5000, cookies });
+        // brief wait for async fetch
+        await new Promise((r) => setTimeout(r, 1500));
+        const hit = await pollOobHit(callbackId, oobBase.startsWith("http") ? oobBase : `https://${host}`);
+        if (hit) {
+          const title = `Confirmed OOB SSRF via ${param} parameter`;
+          findings.push({
+            category: "SSRF",
+            severity: "critical",
+            title,
+            description: `Out-of-band callback confirmed the server fetched an attacker-controlled URL via '${param}'.`,
+            evidence: `GET ${path}\nOOB id: ${callbackId}\nCallback host: ${host}\nPoll: hit=true`,
+            recommendation: "Validate and sanitize URL parameters server-side. Block requests to internal/private IP ranges and untrusted hosts. Use an allowlist for permitted external domains.",
+            cweId: "CWE-918",
+            owaspCategory: "A10:2021 – Server-Side Request Forgery",
+            affectedUrl: `${targetUrl}${path}`,
+            affectedComponent: "SSRF sink",
+            poc: {
+              curlCommand: `curl "${targetUrl}${path}"`,
+              requestRaw: `GET ${path} HTTP/1.1\nHost: ${new URL(targetUrl).host}`,
+              responseSnippet: `OOB callback hit for ${callbackId}`,
+              reproductionSteps: [
+                `Send request with ${param}=${payload}`,
+                `Confirm DNS/HTTP interaction on OOB collaborator`,
+              ],
+            },
+          });
+          await log(scanId, "warn", `VULN: ${title}`, "ssrf");
+        }
+      } catch {
+        // continue
+      }
+    }
   }
 
   for (const param of SSRF_PARAMS) {
@@ -1547,13 +1645,15 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
           const title = `Potential SSRF via ${param} parameter (${name})`;
           findings.push({
             category: "SSRF",
-            severity: "high",
+            severity: oobBase ? "high" : "high",
             title,
-            description: `The parameter '${param}' accepted an internal URL (${name}) and returned a different response, suggesting the server may be fetching the provided URL.`,
+            description: `The parameter '${param}' accepted an internal URL (${name}) and returned a different response, suggesting the server may be fetching the provided URL.${oobBase ? "" : " (Heuristic only — set OOB_CALLBACK_BASE for confirmed OOB detection.)"}`,
             evidence: `GET ${path} → ${resp.status} (${resp.body.length} bytes)\nResponse snippet: ${resp.body.substring(0, 300)}`,
             recommendation: "Validate and sanitize URL parameters server-side. Block requests to internal/private IP ranges. Use an allowlist for permitted external domains.",
             cweId: "CWE-918",
             owaspCategory: "A10:2021 – Server-Side Request Forgery",
+            affectedUrl: `${targetUrl}${path}`,
+            affectedComponent: "SSRF sink",
             poc: {
               curlCommand: `curl "${targetUrl}${path}"`,
               requestRaw: `GET ${path} HTTP/1.1\nHost: ${new URL(targetUrl).host}`,
@@ -3292,6 +3392,7 @@ export async function testVerticalEscalation(
   targetUrl: string,
   profiles: AuthProfile[],
   cookies?: string,
+  adminEndpoints?: string[],
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
   await log(scanId, "info", "Testing for vertical privilege escalation", "auth-roles");
@@ -3305,7 +3406,11 @@ export async function testVerticalEscalation(
     return findings;
   }
 
-  for (const endpoint of AUTH_ADMIN_ENDPOINTS) {
+  const endpointsToTest = (adminEndpoints && adminEndpoints.length > 0)
+    ? adminEndpoints
+    : AUTH_ADMIN_ENDPOINTS;
+
+  for (const endpoint of endpointsToTest) {
     for (const admin of highPriv) {
       let adminStatus: number;
       try {
@@ -3369,51 +3474,90 @@ export async function testHorizontalEscalation(
   targetUrl: string,
   profiles: AuthProfile[],
   cookies?: string,
+  resourcePatterns?: string[],
 ): Promise<Finding[]> {
   const findings: Finding[] = [];
   await log(scanId, "info", "Testing for horizontal privilege escalation (IDOR)", "auth-roles");
 
-  const userProfiles = profiles.filter((p) => {
-    const rank = profilePrivilegeRank(p);
-    return rank >= 1 && rank <= 2;
-  });
+  // Prefer two same-rank user profiles for true BOLA; fall back to any two non-admin profiles
+  const byRank = new Map<number, AuthProfile[]>();
+  for (const p of profiles) {
+    const r = profilePrivilegeRank(p);
+    if (r < 1 || r > 3) continue;
+    const list = byRank.get(r) ?? [];
+    list.push(p);
+    byRank.set(r, list);
+  }
+  let userProfiles: AuthProfile[] = [];
+  for (const [, list] of byRank) {
+    if (list.length >= 2) {
+      userProfiles = list.slice(0, 2);
+      break;
+    }
+  }
+  if (userProfiles.length < 2) {
+    userProfiles = profiles.filter((p) => {
+      const rank = profilePrivilegeRank(p);
+      return rank >= 1 && rank <= 2;
+    });
+  }
 
   if (userProfiles.length < 2) {
     await log(scanId, "info", "Insufficient user-level profiles for horizontal escalation test (need at least 2)", "auth-roles");
     return findings;
   }
 
+  const patterns = (resourcePatterns && resourcePatterns.length > 0)
+    ? resourcePatterns
+    : AUTH_RESOURCE_PATTERNS;
   const testIds = ["1", "2", "100", "999"];
+  // Cross-swap: profile A accesses B's likely id and vice versa
+  const ownerIds = [testIds[0], testIds[1]];
 
-  for (const pattern of AUTH_RESOURCE_PATTERNS) {
-    for (const id of testIds) {
-      const endpoint = pattern.replace("{id}", id);
+  for (const pattern of patterns) {
+    for (let i = 0; i < ownerIds.length; i++) {
+      const id = ownerIds[i];
+      const endpoint = pattern.replace(/\{[^}]+\}/g, id);
       const profileA = userProfiles[0];
       const profileB = userProfiles[1];
+      const accessor = i === 0 ? profileB : profileA;
+      const owner = i === 0 ? profileA : profileB;
 
       try {
-        const respA = await httpGet(targetUrl, endpoint, { headers: buildAuthHeader(profileA), timeout: 5000, cookies });
-        if (respA.status >= 400) continue;
+        const respOwner = await httpGet(targetUrl, endpoint, { headers: buildAuthHeader(owner), timeout: 5000, cookies });
+        if (respOwner.status >= 400) continue;
 
-        const respB = await httpGet(targetUrl, endpoint, { headers: buildAuthHeader(profileB), timeout: 5000, cookies });
+        const respAccessor = await httpGet(targetUrl, endpoint, { headers: buildAuthHeader(accessor), timeout: 5000, cookies });
 
-        if (respB.status < 400 && respB.body.length > 0) {
-          const sameContent = respA.body.trim() === respB.body.trim();
-          if (sameContent) {
-            const title = `Horizontal Privilege Escalation — ${endpoint} accessible across users`;
+        if (respAccessor.status < 400 && respAccessor.body.length > 0) {
+          const sameContent = respOwner.body.trim() === respAccessor.body.trim();
+          if (sameContent || respAccessor.status === respOwner.status) {
+            const title = `Horizontal Privilege Escalation (BOLA/IDOR) — ${endpoint} accessible across users`;
             findings.push({
               category: "Authorization",
               severity: "high",
               title,
-              description: `The resource at ${endpoint} returns identical data for ${profileA.name} and ${profileB.name}, suggesting missing ownership checks (IDOR).`,
-              evidence: `${profileA.name} response: ${respA.status} (${respA.body.substring(0, 100)})\n${profileB.name} response: ${respB.status} (${respB.body.substring(0, 100)})`,
+              description: `The resource at ${endpoint} is readable by ${accessor.name} while appearing to belong to ${owner.name}'s ID space, suggesting missing ownership checks (BOLA/IDOR).`,
+              evidence: `${owner.name} response: ${respOwner.status} (${respOwner.body.substring(0, 100)})\n${accessor.name} response: ${respAccessor.status} (${respAccessor.body.substring(0, 100)})`,
               recommendation: "Enforce resource ownership checks server-side. Verify the authenticated user owns or has been granted access to each requested resource.",
               cweId: "CWE-639",
               owaspCategory: "A01:2021 – Broken Access Control",
-              discoveredAs: profileB.name,
-              exploitableAs: profileB.name,
-              requiredLevel: profileA.name,
+              discoveredAs: accessor.name,
+              exploitableAs: accessor.name,
+              requiredLevel: owner.name,
               authEndpoint: `GET ${endpoint}`,
+              affectedUrl: `${targetUrl}${endpoint}`,
+              affectedComponent: "API object access",
+              poc: {
+                curlCommand: `curl -H "${Object.entries(buildAuthHeader(accessor)).map(([k, v]) => `${k}: ${v}`).join("; ")}" ${targetUrl}${endpoint}`,
+                requestRaw: `GET ${endpoint} HTTP/1.1\nHost: ${new URL(targetUrl).host}`,
+                responseSnippet: `HTTP ${respAccessor.status}\n${respAccessor.body.substring(0, 300)}`,
+                reproductionSteps: [
+                  `Authenticate as ${owner.name} and confirm GET ${endpoint} succeeds`,
+                  `Authenticate as ${accessor.name} and repeat GET ${endpoint}`,
+                  `Compare responses — unauthorized cross-user access indicates BOLA`,
+                ],
+              },
             });
             await log(scanId, "warn", `VULN: ${title}`, "auth-roles");
             break;
@@ -3520,6 +3664,7 @@ export async function testAuthenticatedAccess(
   targetUrl: string,
   authConfig: AuthScanConfig,
   cookies?: string,
+  inventory?: { adminEndpoints?: string[]; resourcePatterns?: string[]; coverageNote?: string },
 ): Promise<Finding[]> {
   const profiles = authConfig.authProfiles ?? [];
   const tests = authConfig.authTests ?? {};
@@ -3530,14 +3675,17 @@ export async function testAuthenticatedAccess(
     return findings;
   }
 
-  await log(scanId, "info", `Auth profiles: ${profiles.map((p) => `${p.name} (${p.type})`).join(", ")}`, "auth-roles");
+  await log(scanId, "info", `Auth profiles: ${profiles.map((p) => `${p.name} (${p.type}, rank=${profilePrivilegeRank(p)})`).join(", ")}`, "auth-roles");
+  if (inventory?.coverageNote) {
+    await log(scanId, "info", inventory.coverageNote, "auth-roles");
+  }
 
   if (tests.verticalEscalation !== false) {
-    findings.push(...await testVerticalEscalation(scanId, targetUrl, profiles, cookies));
+    findings.push(...await testVerticalEscalation(scanId, targetUrl, profiles, cookies, inventory?.adminEndpoints));
   }
 
   if (tests.horizontalEscalation !== false) {
-    findings.push(...await testHorizontalEscalation(scanId, targetUrl, profiles, cookies));
+    findings.push(...await testHorizontalEscalation(scanId, targetUrl, profiles, cookies, inventory?.resourcePatterns));
   }
 
   if (tests.sessionExpiry || tests.tokenReuse) {
@@ -3631,6 +3779,7 @@ export async function runScan(
   manifestPath?: string,
   loginCredentials?: LoginCredentials,
   repoUrl?: string,
+  openapiUrl?: string,
 ): Promise<void> {
   await log(scanId, "info", `=== PenTest Portal Scan Started ===`, "init");
   await log(scanId, "info", `Target: ${targetUrl}`, "init");
@@ -3641,6 +3790,7 @@ export async function runScan(
   try {
     await assertSafeOutboundUrl(targetUrl);
     if (loginCredentials) await assertSafeOutboundUrl(loginCredentials.loginUrl);
+    if (openapiUrl) await assertSafeOutboundUrl(openapiUrl);
   } catch (err) {
     const message = (err as Error).message;
     await log(scanId, "error", `Scan blocked: ${message}`, "init");
@@ -3648,7 +3798,8 @@ export async function runScan(
     return;
   }
 
-  const isAuthenticated = !!loginCredentials;
+  const effectiveLogin = loginCredentials ?? authConfig?.loginCredentials;
+  const isAuthenticated = !!effectiveLogin || !!(authConfig?.authProfiles?.some((p) => p.type !== "none"));
   const authModeValue: "authenticated" | "unauthenticated" = isAuthenticated ? "authenticated" : "unauthenticated";
   const scanAuthMeta: ScanAuthMeta = { authMode: authModeValue };
 
@@ -3661,14 +3812,45 @@ export async function runScan(
   const allFindings: Finding[] = [];
   let endpointsTested = 0;
 
+  // Load OpenAPI inventory when configured
+  let apiInventory: { adminEndpoints?: string[]; resourcePatterns?: string[]; coverageNote?: string } | undefined;
+  if (openapiUrl) {
+    try {
+      const { fetchOpenApiInventory } = await import("./openapiInventory");
+      const inv = await fetchOpenApiInventory(openapiUrl);
+      if (inv) {
+        apiInventory = {
+          adminEndpoints: inv.adminEndpoints,
+          resourcePatterns: inv.resourcePatterns,
+          coverageNote: `API inventory from ${inv.source}: ${inv.endpoints.length} operations, ${inv.adminEndpoints.length} admin-like, ${inv.resourcePatterns.length} resource patterns`,
+        };
+        await log(scanId, "info", apiInventory.coverageNote!, "init");
+        allFindings.push({
+          category: "API Inventory",
+          severity: "info",
+          title: "OpenAPI inventory loaded",
+          description: apiInventory.coverageNote!,
+          evidence: `Admin endpoints sample: ${inv.adminEndpoints.slice(0, 5).join(", ") || "(none)"}\nResource patterns: ${inv.resourcePatterns.slice(0, 5).join(", ") || "(none)"}`,
+          recommendation: "Keep OpenAPI definitions up to date so authz tests cover real API surface.",
+          affectedUrl: openapiUrl,
+          affectedComponent: "OpenAPI",
+        });
+      } else {
+        await log(scanId, "warn", `Failed to load OpenAPI inventory from ${openapiUrl}`, "init");
+      }
+    } catch (err) {
+      await log(scanId, "warn", `OpenAPI inventory error: ${(err as Error).message}`, "init");
+    }
+  }
+
   // Authenticated scanning: login and capture session cookies/token
   let sessionCookies: string | undefined;
-  if (loginCredentials) {
-    await log(scanId, "info", `Authenticated scan — logging in as ${loginCredentials.username}`, "init");
-    scanAuthMeta.loginUrl = loginCredentials.loginUrl;
-    scanAuthMeta.authRole = loginCredentials.username;
+  if (effectiveLogin) {
+    await log(scanId, "info", `Authenticated scan — logging in as ${effectiveLogin.username}`, "init");
+    scanAuthMeta.loginUrl = effectiveLogin.loginUrl;
+    scanAuthMeta.authRole = effectiveLogin.username;
     try {
-      const loginResult = await performLogin(scanId, loginCredentials);
+      const loginResult = await performLogin(scanId, effectiveLogin);
       if (loginResult.startsWith("__bearer__")) {
         const token = loginResult.slice("__bearer__".length);
         sessionCookies = undefined;
@@ -3676,11 +3858,11 @@ export async function runScan(
         if (!authConfig) authConfig = { authProfiles: [] };
         authConfig.authProfiles = authConfig.authProfiles ?? [];
         authConfig.authProfiles.unshift({
-          name: loginCredentials.username,
+          name: effectiveLogin.username,
           type: "bearer",
           token,
         });
-        await log(scanId, "info", `Bearer token captured — added as auth profile "${loginCredentials.username}"`, "init");
+        await log(scanId, "info", `Bearer token captured — added as auth profile "${effectiveLogin.username}"`, "init");
       } else if (loginResult) {
         sessionCookies = loginResult;
         scanAuthMeta.authMethod = "session-cookie";
@@ -3745,7 +3927,7 @@ export async function runScan(
           break;
         case "auth-roles":
           if (authConfig && authConfig.authProfiles && authConfig.authProfiles.length > 0) {
-            toolFindings = await testAuthenticatedAccess(scanId, targetUrl, authConfig, sessionCookies);
+            toolFindings = await testAuthenticatedAccess(scanId, targetUrl, authConfig, sessionCookies, apiInventory);
           } else {
             await log(scanId, "info", "Auth-roles scan skipped: no auth profiles configured", "auth-roles");
           }
@@ -4126,6 +4308,15 @@ export async function runScan(
 
       allFindings.push(...toolFindings);
       await log(scanId, "info", `${tool.toUpperCase()} complete: ${toolFindings.length} finding(s)`, tool);
+    }
+
+    // Deduplicate near-identical findings across tools before scoring/persistence
+    const beforeDedupe = allFindings.length;
+    const uniqueFindings = dedupeFindings(allFindings);
+    allFindings.length = 0;
+    allFindings.push(...uniqueFindings);
+    if (beforeDedupe !== allFindings.length) {
+      await log(scanId, "info", `Deduplicated findings: ${beforeDedupe} → ${allFindings.length}`, "init");
     }
 
     // Calculate score

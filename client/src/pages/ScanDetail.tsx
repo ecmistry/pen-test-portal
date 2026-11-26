@@ -75,11 +75,25 @@ export default function ScanDetail() {
     },
     onError: (e) => toast.error(e.message),
   });
+  const utils = trpc.useUtils();
   const updateFinding = trpc.scans.updateFinding.useMutation({
     onSuccess: () => {
-      trpc.useUtils().scans.findings.invalidate({ scanId });
+      utils.scans.findings.invalidate({ scanId });
       toast.success("Finding status updated");
     },
+  });
+  const pushTicketing = trpc.scans.pushToTicketing.useMutation({
+    onSuccess: (data) => {
+      toast.success(`Ticketing: ${data.summary.created} created, ${data.summary.skipped} skipped`);
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const retestFinding = trpc.scans.retestFinding.useMutation({
+    onSuccess: (data) => {
+      toast.success("Retest scan started");
+      navigate(`/scans/${data.scanId}`);
+    },
+    onError: (e) => toast.error(e.message),
   });
 
   // Auto-poll while scan is running
@@ -183,6 +197,17 @@ export default function ScanDetail() {
                   <FileText className="w-3.5 h-3.5" /> View Report
                 </span>
               </Link>
+            )}
+            {scan.status === "completed" && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-border text-foreground"
+                disabled={pushTicketing.isPending}
+                onClick={() => pushTicketing.mutate({ scanId, useStored: true, dryRun: false })}
+              >
+                {pushTicketing.isPending ? "Pushing…" : "Push to Ticketing"}
+              </Button>
             )}
           </div>
         </div>
@@ -318,6 +343,17 @@ export default function ScanDetail() {
                               <option value="resolved">Resolved</option>
                               <option value="false_positive">False Positive</option>
                             </select>
+                            <button
+                              type="button"
+                              className="text-xs text-cyan-400 hover:text-cyan-300 px-1"
+                              title="Retest this finding"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                retestFinding.mutate({ findingId: f.id });
+                              }}
+                            >
+                              Retest
+                            </button>
                             {expandedFinding === f.id ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
                           </div>
                         </div>

@@ -38,6 +38,12 @@ export const targets = mysqlTable("targets", {
   tags: varchar("tags", { length: 500 }),
   scanFrequency: mysqlEnum("scanFrequency", ["manual", "daily", "weekly", "monthly"]).default("manual").notNull(),
   isActive: boolean("isActive").default(true).notNull(),
+  /** Default multi-role auth + login credentials for scheduled/CI scans */
+  authConfig: json("authConfig"),
+  /** Optional OpenAPI/Swagger URL for API inventory driven testing */
+  openapiUrl: varchar("openapiUrl", { length: 2048 }),
+  /** Optional local lockfile/manifest path for SCA */
+  manifestPath: varchar("manifestPath", { length: 500 }),
   lastScannedAt: timestamp("lastScannedAt"),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
   updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
@@ -129,6 +135,8 @@ export const schedules = mysqlTable("schedules", {
   userId: int("userId").notNull(),
   cronExpression: varchar("cronExpression", { length: 100 }).notNull(),
   tools: varchar("tools", { length: 500 }).notNull().default("headers,auth,sqli,xss"),
+  scanMode: varchar("scanMode", { length: 20 }).default("light").notNull(),
+  autoPushTicketing: boolean("autoPushTicketing").default(false).notNull(),
   enabled: boolean("enabled").default(true).notNull(),
   lastRunAt: timestamp("lastRunAt"),
   nextRunAt: timestamp("nextRunAt"),
@@ -138,6 +146,19 @@ export const schedules = mysqlTable("schedules", {
 
 export type Schedule = typeof schedules.$inferSelect;
 export type InsertSchedule = typeof schedules.$inferInsert;
+
+// ─── Integrations (ticketing) ─────────────────────────────────────────────────
+export const integrations = mysqlTable("integrations", {
+  id: int("id").autoincrement().primaryKey(),
+  userId: int("userId").notNull().unique(),
+  /** AES-GCM encrypted IntegrationsConfig JSON */
+  configEnc: text("configEnc").notNull(),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
+});
+
+export type Integration = typeof integrations.$inferSelect;
+export type InsertIntegration = typeof integrations.$inferInsert;
 
 // ─── Reports ──────────────────────────────────────────────────────────────────
 export const reports = mysqlTable("reports", {
