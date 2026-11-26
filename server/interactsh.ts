@@ -7,7 +7,7 @@
  * - INTERACTSH_TOKEN — optional auth token for self-hosted
  */
 
-import { createHash, generateKeyPairSync, privateDecrypt, constants, randomBytes } from "crypto";
+import { createDecipheriv, generateKeyPairSync, privateDecrypt, constants, randomBytes } from "crypto";
 
 export interface OobSession {
   correlationId: string;
@@ -22,6 +22,29 @@ export interface OobSession {
 
 function randomCorrelationId(): string {
   return randomBytes(8).toString("hex");
+}
+
+/** Decrypt Interactsh AES-CFB interaction blobs (IV prepended to ciphertext) */
+export function decryptInteractshPayloads(aesKeyRaw: Buffer, encryptedBase64Items: string[]): string[] {
+  const out: string[] = [];
+  for (const item of encryptedBase64Items) {
+    try {
+      const buf = Buffer.from(item, "base64");
+      if (buf.length <= 16) continue;
+      const iv = buf.subarray(0, 16);
+      const ciphertext = buf.subarray(16);
+      // Interactsh uses AES-128 or AES-256 depending on key length
+      const key =
+        aesKeyRaw.length >= 32 ? aesKeyRaw.subarray(0, 32) : aesKeyRaw.length >= 16 ? aesKeyRaw.subarray(0, 16) : aesKeyRaw;
+      if (key.length !== 16 && key.length !== 32) continue;
+      const decipher = createDecipheriv(key.length === 32 ? "aes-256-cfb" : "aes-128-cfb", key, iv);
+      const plain = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      out.push(plain.toString("utf8"));
+    } catch {
+      // skip undecryptable blob
+    }
+  }
+  return out;
 }
 
 /** Legacy custom poller used when OOB_CALLBACK_BASE is set */
@@ -98,7 +121,6 @@ export async function createInteractshSession(): Promise<OobSession | null> {
       return null;
     }
 
-    // Derive host: correlationId + server hostname
     const serverHost = new URL(server).hostname;
     const host = `${correlationId}.${serverHost}`;
 
@@ -106,7 +128,6 @@ export async function createInteractshSession(): Promise<OobSession | null> {
       correlationId,
       host,
       makeCallbackUrl: (probeId: string) => {
-        // interactsh matches on correlation prefix; embed probe in subdomain
         const safe = probeId.replace(/[^a-zA-Z0-9-]/g, "").slice(0, 20) || "p";
         return `http://${safe}.${host}`;
       },
@@ -126,29 +147,23 @@ export async function createInteractshSession(): Promise<OobSession | null> {
             extra?: unknown;
           } | null;
           if (!data?.data?.length) return false;
-          const joined = data.data.join("\n");
-          // Prefer exact probe correlation when probeId provided
-          if (probeId) {
-            if (joined.includes(probeId)) return true;
-            // Try decrypt AES payloads and search for probe id only
-            if (data.aes_key) {
-              try {
-                const aesKeyRaw = privateDecrypt(
-                  { key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
-                  Buffer.from(data.aes_key, "base64")
-                );
-                void aesKeyRaw;
-                void createHash;
-                // Without reliable AES-CFB decrypt of each blob, require probeId in ciphertext/metadata
-                return joined.toLowerCase().includes(probeId.toLowerCase());
-              } catch {
-                return joined.toLowerCase().includes(probeId.toLowerCase());
-              }
+
+          let haystack = data.data.join("\n");
+          if (data.aes_key) {
+            try {
+              const aesKeyRaw = privateDecrypt(
+                { key: privateKey, padding: constants.RSA_PKCS1_OAEP_PADDING, oaepHash: "sha256" },
+                Buffer.from(data.aes_key, "base64")
+              );
+              const decrypted = decryptInteractshPayloads(aesKeyRaw, data.data);
+              if (decrypted.length) haystack = `${haystack}\n${decrypted.join("\n")}`;
+            } catch {
+              // fall through to ciphertext search
             }
-            return false;
           }
-          // No probeId: any interaction for this correlation counts
-          return true;
+
+          if (!probeId) return true;
+          return haystack.toLowerCase().includes(probeId.toLowerCase());
         } catch {
           return false;
         }

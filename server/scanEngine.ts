@@ -51,13 +51,18 @@ import {
   type FindingConfidence,
   type ProbeTarget,
   normalizeFindingKey,
+  cweUrlKey,
   preferFinding,
   mergeEvidence,
   mergeProbePaths,
   graphqlPathsFromInventory,
   confidenceScoreMultiplier,
+  nucleiConfidenceFromRow,
+  inventoryUrlsForDast,
+  injectPathSegment,
+  toolsForRetest,
 } from "./scanQuality";
-import { findingFingerprint } from "./findingFingerprint";
+import { findingFingerprint, isWaivedFinding } from "./findingFingerprint";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 export type ScanMode = "light" | "full";
@@ -251,23 +256,36 @@ export function profilePrivilegeRank(profile: AuthProfile): number {
 
 /** Cross-tool dedupe using normalized URL + CWE/template/title correlation. */
 export function dedupeFindings<T extends Finding>(findings: T[]): T[] {
-  const byKey = new Map<string, T>();
-  for (const f of findings) {
-    const key = normalizeFindingKey(f);
+  const mergeInto = (byKey: Map<string, T>, key: string, f: T) => {
     const existing = byKey.get(key);
     if (!existing) {
       byKey.set(key, f);
-      continue;
+      return;
     }
     const preferred = preferFinding(existing, f) as T;
     preferred.evidence = mergeEvidence(existing.evidence, f.evidence);
     if (!preferred.templateId && (f as Finding).templateId) preferred.templateId = (f as Finding).templateId;
+    if (!preferred.cweId && (f as Finding).cweId) preferred.cweId = (f as Finding).cweId;
     if (!preferred.confidence || CONFIDENCE_FALLBACK(f) > CONFIDENCE_FALLBACK(preferred)) {
       preferred.confidence = f.confidence ?? preferred.confidence;
     }
     byKey.set(key, preferred);
+  };
+
+  const byKey = new Map<string, T>();
+  for (const f of findings) mergeInto(byKey, normalizeFindingKey(f), f);
+
+  // Secondary pass: merge cross-tool duplicates that share CWE + normalized URL
+  const byCwe = new Map<string, T>();
+  for (const f of Array.from(byKey.values())) {
+    const ck = cweUrlKey(f);
+    if (!ck) {
+      byCwe.set(`uniq:${normalizeFindingKey(f)}`, f);
+      continue;
+    }
+    mergeInto(byCwe, ck, f);
   }
-  return Array.from(byKey.values());
+  return Array.from(byCwe.values());
 }
 
 function CONFIDENCE_FALLBACK(f: { confidence?: FindingConfidence | null }): number {
@@ -960,6 +978,44 @@ async function testSQLInjection(scanId: number, targetUrl: string, scanMode: Sca
     }
   }
 
+
+  // Path-segment SQLi for /resource/{id} style routes
+  const pathIdRoutes = testPaths.filter((p) => /\/\d+(?:\/|$|\?)/.test(p.split("?")[0]));
+  for (const basePath of pathIdRoutes.slice(0, 6)) {
+    for (const payload of payloads.slice(0, payloadLimit)) {
+      const injected = injectPathSegment(basePath.split("?")[0], payload);
+      if (!injected) continue;
+      try {
+        let baselineOk = true;
+        try {
+          const baseInj = injectPathSegment(basePath.split("?")[0], "1");
+          if (baseInj) {
+            const br = await httpGet(targetUrl, baseInj, { cookies, timeout: 8000 });
+            if (SQL_ERROR_PATTERNS.some((pat) => pat.test(br.body))) baselineOk = false;
+          }
+        } catch { /* ignore */ }
+        const resp = await httpGet(targetUrl, injected, { cookies, timeout: 12000 });
+        if (baselineOk && SQL_ERROR_PATTERNS.some((pat) => pat.test(resp.body))) {
+          findings.push({
+            category: "SQL Injection",
+            severity: "critical",
+            confidence: "confirmed",
+            title: `SQL injection via path segment (${basePath.split("?")[0]})`,
+            description: "Path parameter accepted a SQL metacharacter payload and returned a database error.",
+            evidence: `GET ${injected} → ${resp.status}\n${resp.body.substring(0, 400)}`,
+            recommendation: "Use parameterized queries for path parameters. Validate IDs as typed values (UUID/int).",
+            cweId: "CWE-89",
+            owaspCategory: "A03:2021 – Injection",
+            affectedUrl: `${targetUrl.replace(/\/$/, "")}${injected}`,
+            affectedComponent: "Path parameter",
+            templateId: `path-sqli:${basePath.split("?")[0]}`,
+          });
+          break;
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
   if (findings.length === 0) {
     await log(scanId, "success", "No SQL injection vulnerabilities detected in tested endpoints", "sqli");
   }
@@ -1067,6 +1123,37 @@ async function testXSS(scanId: number, targetUrl: string, scanMode: ScanMode, co
       } catch {
         // continue
       }
+    }
+  }
+
+
+  const xssPathIds = mergeProbePaths([], extraPaths, 12).filter((p) => /\/\d+(?:\/|$)/.test(p.split("?")[0]));
+  for (const basePath of xssPathIds.slice(0, 5)) {
+    for (const payload of payloads.slice(0, Math.min(2, payloadLimit))) {
+      const injected = injectPathSegment(basePath.split("?")[0], payload);
+      if (!injected) continue;
+      try {
+        const resp = await httpGet(targetUrl, injected, { cookies });
+        const ct = (resp.headers["content-type"] || "").toLowerCase();
+        const htmlContext = ct.includes("text/html") || resp.body.includes("<html");
+        if (htmlContext && resp.body.includes(payload) && !resp.body.includes("&lt;")) {
+          findings.push({
+            category: "XSS",
+            severity: "high",
+            confidence: "confirmed",
+            title: `Reflected XSS via path segment (${basePath.split("?")[0]})`,
+            description: "Path parameter reflected unsanitized into an HTML response.",
+            evidence: `GET ${injected} → ${resp.status}\n${resp.body.substring(0, 400)}`,
+            recommendation: "Encode path parameters for HTML context; prefer typed IDs.",
+            cweId: "CWE-79",
+            owaspCategory: "A03:2021 – Injection",
+            affectedUrl: `${targetUrl.replace(/\/$/, "")}${injected}`,
+            affectedComponent: "Path parameter",
+            templateId: `path-xss:${basePath.split("?")[0]}`,
+          });
+          break;
+        }
+      } catch { /* ignore */ }
     }
   }
 
@@ -1682,6 +1769,60 @@ export async function testSSRF(scanId: number, targetUrl: string, cookies?: stri
         // continue
       }
     }
+
+    // Inventory OOB: inject callback into OpenAPI/discovery sinks
+    const invOob = (extraPaths || []).slice(0, 8);
+    for (const item of invOob) {
+      if (findings.some((f) => f.confidence === "confirmed" && f.category === "SSRF")) break;
+      const invPath = typeof item === "string" ? item : item.path;
+      if (!invPath) continue;
+      const method = (typeof item === "string" ? "GET" : (item.method || "GET")).toUpperCase();
+      const params = typeof item === "string" ? ["url", "redirect", "callback"] : (item.params?.length ? item.params : ["url", "redirect", "callback"]);
+      const urlish = params.filter((p) => /url|uri|redirect|callback|webhook|target|link|fetch|image|src/i.test(p)).slice(0, 2);
+      const useParams = urlish.length ? urlish : params.slice(0, 1);
+      for (const param of useParams) {
+        const probeId = `gs${scanId}inv${param.replace(/[^a-z]/gi, "").slice(0, 6)}${Date.now().toString(36).slice(-3)}`;
+        const payload = oob.makeCallbackUrl(probeId);
+        try {
+          if (method === "GET") {
+            const q = invPath.includes("?")
+              ? `${invPath}${invPath.endsWith("=") || invPath.endsWith("&") ? "" : "&"}${param}=${encodeURIComponent(payload)}`
+              : `${invPath}?${param}=${encodeURIComponent(payload)}`;
+            await httpGet(targetUrl, q, { timeout: 5000, cookies });
+          } else {
+            const bodyObj: Record<string, string> = {};
+            for (const p of params.slice(0, 4)) bodyObj[p] = p === param ? payload : "https://example.com/";
+            await httpGet(targetUrl, invPath.split("?")[0], {
+              method,
+              body: JSON.stringify(bodyObj),
+              headers: { "Content-Type": "application/json" },
+              timeout: 5000,
+              cookies,
+            });
+          }
+          await new Promise((r) => setTimeout(r, 1500));
+          const hit = await oob.poll(probeId);
+          if (hit) {
+            findings.push({
+              category: "SSRF",
+              severity: "critical",
+              confidence: "confirmed",
+              title: `Confirmed OOB SSRF on inventory ${method} ${invPath} (${param})`,
+              description: `Out-of-band callback confirmed SSRF via inventory endpoint field '${param}'.`,
+              evidence: `${method} ${invPath} param=${param}\nOOB probe: ${probeId}\nhost: ${oob.host}`,
+              recommendation: "Validate and sanitize URL parameters server-side. Block requests to internal/private IP ranges and untrusted hosts.",
+              cweId: "CWE-918",
+              owaspCategory: "A10:2021 – Server-Side Request Forgery",
+              affectedUrl: `${targetUrl.replace(/\/$/, "")}${invPath.startsWith("/") ? "" : "/"}${invPath.split("?")[0]}`,
+              affectedComponent: "SSRF sink (inventory)",
+              templateId: `ssrf-oob-inv:${invPath}:${param}`,
+            });
+            break;
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
     await oob.close?.();
   } else {
     await log(scanId, "info", "OOB collaborator unavailable — using heuristic SSRF checks only (set INTERACTSH_SERVER or OOB_CALLBACK_BASE)", "ssrf");
@@ -3563,11 +3704,18 @@ export async function testVerticalEscalation(
         try {
           const resp = await httpGet(targetUrl, endpoint, { headers: buildAuthHeader(user), timeout: 5000, cookies });
 
-          if (resp.status < 400) {
+          const looksDenied = /unauthorized|forbidden|access denied|not allowed|\blogin\b/i.test(resp.body.slice(0, 500));
+          if (resp.status < 400 && !looksDenied && resp.status === adminStatus) {
+            const unauth = await httpGet(targetUrl, endpoint, { timeout: 5000 }).catch(() => null);
+            // Publicly identical response → not a privilege-escalation finding
+            if (unauth && unauth.status === resp.status && Math.abs(unauth.body.length - resp.body.length) < 40) {
+              continue;
+            }
             const title = `Vertical Privilege Escalation — ${endpoint} accessible as ${user.name}`;
             findings.push({
               category: "Authorization",
               severity: "high",
+              confidence: "likely",
               title,
               description: `The endpoint ${endpoint} (expected: ${admin.name}-level) returned HTTP ${resp.status} when accessed as ${user.name}. This may allow privilege escalation.`,
               evidence: `Admin (${admin.name}): ${adminStatus}\nLow-priv (${user.name}): ${resp.status}\nResponse snippet: ${resp.body.substring(0, 200)}`,
@@ -3668,11 +3816,14 @@ export async function testHorizontalEscalation(
 
         if (respAccessor.status < 400 && respAccessor.body.length > 0) {
           const sameContent = respOwner.body.trim() === respAccessor.body.trim();
-          if (sameContent || respAccessor.status === respOwner.status) {
+          const similarLen = Math.abs(respOwner.body.length - respAccessor.body.length) < Math.max(30, respOwner.body.length * 0.15);
+          // Require content equality or near-identical body — same status alone is too noisy
+          if (sameContent || (respAccessor.status === respOwner.status && similarLen && respOwner.body.length > 20)) {
             const title = `Horizontal Privilege Escalation (BOLA/IDOR) — ${endpoint} accessible across users`;
             findings.push({
               category: "Authorization",
               severity: "high",
+              confidence: sameContent ? "confirmed" : "likely",
               title,
               description: `The resource at ${endpoint} is readable by ${accessor.name} while appearing to belong to ${owner.name}'s ID space, suggesting missing ownership checks (BOLA/IDOR).`,
               evidence: `${owner.name} response: ${respOwner.status} (${respOwner.body.substring(0, 100)})\n${accessor.name} response: ${respAccessor.status} (${respAccessor.body.substring(0, 100)})`,
@@ -3994,12 +4145,12 @@ export interface TrendSummary {
 }
 
 export function computeTrend(
-  currentFindings: Pick<Finding, "title" | "category" | "severity" | "cweId" | "affectedUrl">[],
-  previousFindings: { title: string; category: string; severity: string; cweId?: string | null; affectedUrl?: string | null }[],
+  currentFindings: Pick<Finding, "title" | "category" | "severity" | "cweId" | "affectedUrl" | "templateId">[],
+  previousFindings: { title: string; category: string; severity: string; cweId?: string | null; affectedUrl?: string | null; templateId?: string | null }[],
   previousScan: { id: number; completedAt: Date | null; authMode?: string | null }
 ): TrendSummary {
-  const keyOf = (f: { title: string; category: string; cweId?: string | null; affectedUrl?: string | null }) =>
-    findingFingerprint({ title: f.title, category: f.category, cweId: f.cweId }) + "::" + (f.affectedUrl || "").split("?")[0].toLowerCase();
+  const keyOf = (f: { title: string; category: string; cweId?: string | null; affectedUrl?: string | null; templateId?: string | null }) =>
+    normalizeFindingKey({ title: f.title, category: f.category, cweId: f.cweId, affectedUrl: f.affectedUrl, templateId: f.templateId });
   const prevSet = new Set(previousFindings.map((f) => keyOf(f)));
   const currSet = new Set(currentFindings.map((f) => keyOf(f)));
 
@@ -4461,7 +4612,17 @@ export async function runScan(
             await log(scanId, "info", "Nuclei found — running template scan (up to 5 minutes; low/medium/high/critical + CVE/misconfig tags)...", "nuclei");
             let output = "";
             const nucleiSeverity = scanMode === "full" ? "low,medium,high,critical" : "medium,high,critical";
-            const nucleiArgs = ["-u", targetUrl, "-severity", nucleiSeverity, "-jsonl", "-silent"];
+            const nucleiUrls = inventoryUrlsForDast(targetUrl, probeTargets, scanMode === "full" ? 25 : 10);
+            const nucleiArgs = ["-severity", nucleiSeverity, "-jsonl", "-silent"];
+            if (nucleiUrls.length > 1) {
+              const { writeFile } = await import("fs/promises");
+              const listFile = `/tmp/nuclei-targets-${scanId}.txt`;
+              await writeFile(listFile, nucleiUrls.join("\n") + "\n", "utf8");
+              nucleiArgs.push("-l", listFile);
+              await log(scanId, "info", `Nuclei targeting ${nucleiUrls.length} inventory URL(s)`, "nuclei");
+            } else {
+              nucleiArgs.push("-u", targetUrl);
+            }
             if (scanMode === "full") nucleiArgs.push("-tags", "cve,misconfig,exposure,takeover");
             if (sessionCookies) nucleiArgs.push("-H", `Cookie: ${sessionCookies}`);
             try {
@@ -4492,10 +4653,12 @@ export async function runScan(
                   const classification = info.classification || {};
                   const cweList = classification["cwe-id"];
                   const cwe = Array.isArray(cweList) ? cweList[0] : undefined;
+                  const nConf = nucleiConfidenceFromRow(row as Record<string, unknown>);
+                  if (sev === "info" && nConf === "heuristic" && row["matcher-status"] === false) continue;
                   toolFindings.push({
                     category: "Nuclei",
                     severity: sev,
-                    confidence: "likely",
+                    confidence: nConf,
                     title: String(name).slice(0, 200),
                     description: info.description || String(name),
                     evidence: JSON.stringify({
@@ -4570,8 +4733,10 @@ export async function runScan(
           const wapitiOut = `/tmp/wapiti-${scanId}.json`;
           try {
             await log(scanId, "info", "Wapiti found — running crawl + modules (up to 5 minutes)...", "wapiti");
-            const wapitiArgs = ["-u", targetUrl, "-f", "json", "-o", wapitiOut, "-v", "0", "--scope", "domain"];
+            const wapitiSeed = inventoryUrlsForDast(targetUrl, probeTargets, 8)[1] || targetUrl;
+            const wapitiArgs = ["-u", wapitiSeed, "-f", "json", "-o", wapitiOut, "-v", "0", "--scope", "domain"];
             if (sessionCookies) wapitiArgs.push("--cookie", sessionCookies);
+            if (wapitiSeed !== targetUrl) await log(scanId, "info", `Wapiti seed URL from inventory: ${wapitiSeed}`, "wapiti");
             await runTool(wapitiCmd, wapitiArgs, {
               timeout: 300000,
               maxBuffer: 8 * 1024 * 1024,
@@ -4624,7 +4789,9 @@ export async function runScan(
 
             const zapOutFile = `/tmp/zap-report-${scanId}.json`;
             await log(scanId, "info", "ZAP found — running quick scan (up to 5 minutes)...", "zap");
-            const zapArgs = ["-cmd", "-quickurl", targetUrl, "-quickout", zapOutFile, "-quickprogress"];
+            const zapSeeds = inventoryUrlsForDast(targetUrl, probeTargets, 6);
+            const zapStart = zapSeeds[0] || targetUrl;
+            const zapArgs = ["-cmd", "-quickurl", zapStart, "-quickout", zapOutFile, "-quickprogress"];
             if (sessionCookies) {
               zapArgs.push(
                 "-config", "replacer.full_list(0).description=ghoststrike-cookie",
@@ -4634,6 +4801,12 @@ export async function runScan(
                 "-config", `replacer.full_list(0).replacement=${sessionCookies}`,
                 "-config", "replacer.full_list(0).initiators="
               );
+            }
+            // Seed additional URLs into ZAP context via forced browse list when inventory present
+            if (zapSeeds.length > 1) {
+              for (let zi = 1; zi < Math.min(zapSeeds.length, 5); zi++) {
+                zapArgs.push("-config", `spider.url=${zapSeeds[zi]}`);
+              }
             }
             const { output: consoleOutput } = await runTool("zap.sh", zapArgs, {
               timeout: 300000,
@@ -4656,18 +4829,34 @@ export async function runScan(
                   const uris = instances.slice(0, 5).map((inst) => String((inst as Record<string,unknown>).uri || "")).filter(Boolean);
                   const cweId = alert.cweid ? `CWE-${alert.cweid}` : undefined;
                   const pluginId = alert.pluginid ? String(alert.pluginid) : undefined;
+                  const alertName = String(alert.name || alert.alert || "Unknown alert");
+                  const isPassive = /passive|informational|cookie|header|timestamp|autocomplete|x-content|x-frame|strict-transport|content-type-options/i.test(alertName + " " + String(alert.alertRef || ""));
+                  const firstInst = instances.length > 0 ? (instances[0] as Record<string, unknown>) : {};
+                  const instMethod = String(firstInst.method || "GET");
+                  const instParam = String(firstInst.param || firstInst.attack || "");
+                  const instEvidence = String(firstInst.evidence || firstInst.otherinfo || "").slice(0, 500);
+                  const zapConf = severity === "info" || isPassive ? "heuristic" as const : "likely" as const;
                   toolFindings.push({
                     category: "OWASP ZAP",
                     severity,
-                    confidence: severity === "info" ? "heuristic" : "likely",
+                    confidence: zapConf,
                     templateId: pluginId,
-                    title: `[ZAP] ${String(alert.name || alert.alert || "Unknown alert")}`,
+                    title: `[ZAP] ${alertName}`,
                     description: desc.substring(0, 1500),
-                    evidence: `Affected: ${instances.length} instance(s)${uris.length ? ` — ${uris.join(", ")}` : (firstUri ? ` — e.g. ${firstUri}` : "")}${pluginId ? `\npluginId=${pluginId}` : ""}`,
+                    evidence: `Affected: ${instances.length} instance(s)${uris.length ? ` — ${uris.join(", ")}` : (firstUri ? ` — e.g. ${firstUri}` : "")}${pluginId ? `\npluginId=${pluginId}` : ""}${instParam ? `\nparam=${instParam}` : ""}${instEvidence ? `\nevidence=${instEvidence}` : ""}`,
                     recommendation: solution.substring(0, 1000),
                     cweId,
                     affectedUrl: firstUri || targetUrl,
                     affectedComponent: "DAST Scanner (OWASP ZAP)",
+                    poc: firstUri ? {
+                      curlCommand: `curl -X ${instMethod} '${firstUri}'`,
+                      requestRaw: `${instMethod} ${firstUri} HTTP/1.1`,
+                      responseSnippet: instEvidence || desc.substring(0, 300),
+                      reproductionSteps: [
+                        `Open ${firstUri} in an authenticated browser session`,
+                        `Reproduce with ZAP alert ${alertName}${pluginId ? ` (plugin ${pluginId})` : ""}`,
+                      ],
+                    } : undefined,
                   });
                   zapAlertCount++;
                 }
@@ -4732,24 +4921,21 @@ export async function runScan(
     }
 
     // Apply org waivers: exclude from score/trend; persist as false_positive
-    const waivedFingerprints = new Set<string>();
+    let activeWaivers = new Set<string>();
     try {
       const scanRow = await getScanById(scanId);
       const orgId = scanRow?.orgId;
       if (orgId) {
-        const fps = await getActiveWaiverFingerprints(orgId);
-        for (const f of allFindings) {
-          const fp = findingFingerprint(f);
-          if (fps.has(fp)) waivedFingerprints.add(fp);
-        }
-        if (waivedFingerprints.size) {
-          await log(scanId, "info", `Applied ${waivedFingerprints.size} waived fingerprint(s) — excluded from score`, "waiver");
+        activeWaivers = await getActiveWaiverFingerprints(orgId);
+        const waivedCount = allFindings.filter((f) => isWaivedFinding(f, activeWaivers)).length;
+        if (waivedCount) {
+          await log(scanId, "info", `Applied ${waivedCount} waived finding(s) — excluded from score`, "waiver");
         }
       }
     } catch (wErr: unknown) {
       await log(scanId, "warn", `Waiver lookup skipped: ${(wErr as Error).message}`, "waiver");
     }
-    const scoreFindings = allFindings.filter((f) => !waivedFingerprints.has(findingFingerprint(f)));
+    const scoreFindings = allFindings.filter((f) => !isWaivedFinding(f, activeWaivers));
 
     // Calculate score
     const { score, riskLevel } = calculateScore(scoreFindings);
@@ -4794,7 +4980,7 @@ export async function runScan(
 
         const poc = f.poc ?? null;
 
-        const waived = waivedFingerprints.has(findingFingerprint(f));
+        const waived = isWaivedFinding(f, activeWaivers);
         return {
           scanId,
           category: f.category,
@@ -4876,12 +5062,14 @@ export async function runScan(
       if (parentId) {
         const parent = await getFindingById(parentId);
         if (parent) {
+          const parentKey = normalizeFindingKey(parent);
+          const parentCwe = cweUrlKey(parent);
           const stillPresent = allFindings.some((f) => {
-            const sameTitle = f.title.toLowerCase() === parent.title.toLowerCase();
-            const sameCwe = !!(parent.cweId && f.cweId && f.cweId === parent.cweId);
-            const sameCat = f.category.toLowerCase() === parent.category.toLowerCase() &&
-              f.severity === parent.severity;
-            return sameTitle || sameCwe || sameCat;
+            if (normalizeFindingKey(f) === parentKey) return true;
+            if (parentCwe && cweUrlKey(f) === parentCwe) return true;
+            // Title+category exact (not severity-only) as last resort
+            return f.title.toLowerCase() === parent.title.toLowerCase() &&
+              f.category.toLowerCase() === parent.category.toLowerCase();
           });
           if (!stillPresent) {
             await updateFindingStatus(parentId, "resolved");

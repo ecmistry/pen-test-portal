@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { parseOpenApiDocument } from "./openapiInventory";
+import { parseOpenApiDocument, extractSchemaPropertyNames } from "./openapiInventory";
 import { dedupeFindings, profilePrivilegeRank } from "./scanEngine";
-import { mergeProbePaths, normalizeFindingKey, confidenceScoreMultiplier } from "./scanQuality";
+import { mergeProbePaths, normalizeFindingKey, confidenceScoreMultiplier, cweUrlKey, toolsForRetest, injectPathSegment, inventoryUrlsForDast, nucleiConfidenceFromRow } from "./scanQuality";
 import { findingFingerprint } from "./findingFingerprint";
 
 describe("parseOpenApiDocument", () => {
@@ -82,5 +82,56 @@ describe("findingFingerprint", () => {
   it("stable for waiver matching", () => {
     expect(findingFingerprint({ title: "Missing HSTS", category: "Headers", cweId: "CWE-1" }))
       .toBe(findingFingerprint({ title: " missing hsts ", category: "headers", cweId: "cwe-1" }));
+  });
+});
+
+describe("OpenAPI body schema params", () => {
+  it("extracts requestBody property names", () => {
+    const inv = parseOpenApiDocument({
+      components: { schemas: { Search: { type: "object", properties: { query: { type: "string" }, limit: { type: "integer" } } } } },
+      paths: {
+        "/api/search": {
+          post: {
+            requestBody: { content: { "application/json": { schema: { $ref: "#/components/schemas/Search" } } } },
+          },
+        },
+      },
+    });
+    const post = inv.probeTargets?.find((p) => p.method === "POST");
+    expect(post?.params).toEqual(expect.arrayContaining(["query", "limit"]));
+  });
+
+  it("includes admin paths from POST ops", () => {
+    const inv = parseOpenApiDocument({
+      paths: { "/api/admin/reset": { post: { tags: ["admin"] } } },
+    });
+    expect(inv.adminEndpoints.some((p) => p.includes("admin"))).toBe(true);
+  });
+});
+
+describe("scanQuality extras", () => {
+  it("cweUrlKey + secondary dedupe merges cross-tool", () => {
+    expect(cweUrlKey({ cweId: "CWE-89", affectedUrl: "https://t/a/1" })).toContain("cwe-89");
+    const out = dedupeFindings([
+      { title: "Nuclei SQLi", category: "Nuclei", severity: "critical" as const, cweId: "CWE-89", affectedUrl: "https://t/a/1", templateId: "cve-1", confidence: "likely" as const },
+      { title: "SQL injection", category: "SQL Injection", severity: "critical" as const, cweId: "CWE-89", affectedUrl: "https://t/a/2", confidence: "confirmed" as const, evidence: "err" },
+    ]);
+    expect(out.length).toBe(1);
+    expect(out[0].confidence).toBe("confirmed");
+  });
+
+  it("injectPathSegment and inventoryUrlsForDast", () => {
+    expect(injectPathSegment("/api/users/5", "1'")).toContain(encodeURIComponent("1'"));
+    const urls = inventoryUrlsForDast("https://t", [{ path: "/api/items", method: "GET" }, { path: "/api/x", method: "POST" }], 5);
+    expect(urls[0]).toBe("https://t");
+    expect(urls.some((u) => u.includes("/api/items"))).toBe(true);
+    expect(urls.every((u) => !u.endsWith("/api/x"))).toBe(true);
+  });
+
+  it("toolsForRetest and nucleiConfidenceFromRow", () => {
+    expect(toolsForRetest({ category: "SQL Injection", cweId: "CWE-89" })).toContain("sqli");
+    expect(toolsForRetest({ category: "Authorization", title: "BOLA" })).toContain("auth-roles");
+    expect(nucleiConfidenceFromRow({ info: { severity: "info" }, "matcher-status": false })).toBe("heuristic");
+    expect(nucleiConfidenceFromRow({ info: { severity: "high" }, "matcher-status": true, "curl-command": "curl x", type: "http" })).toBe("confirmed");
   });
 });

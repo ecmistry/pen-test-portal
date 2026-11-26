@@ -86,7 +86,8 @@ import {
   redactIntegrationsConfig,
 } from "./integrationsCrypto";
 import { LIGHT_DEFAULT_TOOLS } from "@shared/scanTools";
-import { findingFingerprint } from "./findingFingerprint";
+import { findingFingerprint, isWaivedFinding } from "./findingFingerprint";
+import { toolsForRetest } from "./scanQuality";
 import { incCounter } from "./metrics";
 
 const httpUrl = z.string().max(2048).url().refine(isHttpUrl, "URL must use http or https");
@@ -174,7 +175,7 @@ async function buildCicdStatusPayload(
   const orgId = opts?.orgId ?? scan?.orgId ?? null;
   if (orgId) {
     const waived = (await getActiveWaiverFingerprints(orgId)) || new Set<string>();
-    findings = findings.filter((f) => !waived.has(findingFingerprint(f)));
+    findings = findings.filter((f) => !isWaivedFinding(f, waived));
   }
 
   // Fail-on-new: only findings listed in trendSummary.newItems
@@ -693,21 +694,21 @@ export const appRouter = router({
         const target = await getTargetById(scan.targetId);
         if (!target) throw new TRPCError({ code: "NOT_FOUND" });
 
-        const tools = [finding.category.toLowerCase().includes("nuclei") ? "nuclei"
-          : finding.category.toLowerCase().includes("zap") ? "zap"
-          : finding.category.toLowerCase().includes("ssrf") ? "ssrf"
-          : finding.category.toLowerCase().includes("sql") ? "sqli"
-          : finding.category.toLowerCase().includes("xss") ? "xss"
-          : finding.category.toLowerCase().includes("header") ? "headers"
-          : finding.category.toLowerCase().includes("auth") ? "auth"
-          : "headers"];
+        const tools = toolsForRetest({
+          category: finding.category,
+          title: finding.title,
+          templateId: finding.templateId,
+          cweId: finding.cweId,
+        });
+        // Prefer parent scan mode when available for more reliable reproduction
+        const retestMode = (scan.scanMode === "full" ? "full" : "light") as "light" | "full";
 
         const scanId = await createScan({
           targetId: target.id,
           userId: ctx.user.id,
           status: "queued",
           tools: tools.join(","),
-          scanMode: "light",
+          scanMode: retestMode,
           triggeredBy: "retest",
           parentFindingId: finding.id,
           orgId: target.orgId ?? null,
@@ -719,7 +720,7 @@ export const appRouter = router({
           targetId: target.id,
           targetUrl: target.url,
           tools,
-          scanMode: "light",
+          scanMode: retestMode,
           authConfig: storedAuth,
           manifestPath: (target as Target & { manifestPath?: string | null }).manifestPath ?? undefined,
           loginCredentials: storedAuth?.loginCredentials,
@@ -1031,6 +1032,8 @@ export const appRouter = router({
         let title = input.title;
         let category = input.category;
         let cweId = input.cweId;
+        let affectedUrl: string | null | undefined;
+        let templateId: string | null | undefined;
         if (input.findingId) {
           const finding = await getFindingById(input.findingId);
           if (!finding) throw new TRPCError({ code: "NOT_FOUND" });
@@ -1040,12 +1043,14 @@ export const appRouter = router({
           title = finding.title;
           category = finding.category;
           cweId = finding.cweId || undefined;
+          affectedUrl = finding.affectedUrl;
+          templateId = finding.templateId;
           await updateFindingStatus(finding.id, "false_positive");
         }
         const id = await createFindingWaiver({
           orgId,
           userId: ctx.user.id,
-          fingerprint: findingFingerprint({ title, category, cweId }),
+          fingerprint: findingFingerprint({ title, category, cweId, affectedUrl, templateId }),
           title,
           category: category ?? null,
           cweId: cweId ?? null,
