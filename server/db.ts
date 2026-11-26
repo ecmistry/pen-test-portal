@@ -1,21 +1,29 @@
 import { and, desc, eq, gte, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
+  InsertAuditEvent,
   InsertCicdApiKey,
+  InsertFindingWaiver,
   InsertIntegration,
   InsertOrganization,
   InsertReport,
   InsertScan,
+  InsertScanArtifact,
   InsertScanFinding,
+  InsertScanJob,
   InsertScanLog,
   InsertSchedule,
   InsertTarget,
   InsertUser,
+  auditEvents,
   cicdApiKeys,
+  findingWaivers,
   integrations,
   organizations,
   reports,
+  scanArtifacts,
   scanFindings,
+  scanJobs,
   scanLogs,
   scans,
   schedules,
@@ -24,6 +32,7 @@ import {
 } from "../drizzle/schema";
 import { ENV } from "./_core/env";
 import { createHash, randomBytes } from "crypto";
+import { findingFingerprint } from "./findingFingerprint";
 
 let _db: ReturnType<typeof drizzle> | null = null;
 
@@ -104,6 +113,68 @@ async function applyLightMigrations(db: ReturnType<typeof drizzle>) {
         lastUsedAt TIMESTAMP NULL,
         revokedAt TIMESTAMP NULL,
         createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `));
+  } catch { /* exists */ }
+  await safeAlter("ALTER TABLE integrations ADD COLUMN orgId INT DEFAULT NULL");
+  try {
+    await db.execute(sql.raw(`
+      CREATE TABLE IF NOT EXISTS finding_waivers (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        orgId INT NOT NULL,
+        userId INT NOT NULL,
+        fingerprint VARCHAR(255) NOT NULL,
+        title VARCHAR(500) NOT NULL,
+        category VARCHAR(100) NULL,
+        cweId VARCHAR(20) NULL,
+        reason TEXT NULL,
+        expiresAt TIMESTAMP NULL,
+        createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY uq_waiver_org_fp (orgId, fingerprint)
+      )
+    `));
+  } catch { /* exists */ }
+  try {
+    await db.execute(sql.raw(`
+      CREATE TABLE IF NOT EXISTS audit_events (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        orgId INT NULL,
+        userId INT NULL,
+        action VARCHAR(100) NOT NULL,
+        resourceType VARCHAR(64) NULL,
+        resourceId VARCHAR(64) NULL,
+        meta JSON NULL,
+        createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_audit_org_created (orgId, createdAt)
+      )
+    `));
+  } catch { /* exists */ }
+  try {
+    await db.execute(sql.raw(`
+      CREATE TABLE IF NOT EXISTS scan_jobs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        scanId INT NOT NULL,
+        status ENUM('queued','running','completed','failed') NOT NULL DEFAULT 'queued',
+        payload JSON NULL,
+        errorMessage TEXT NULL,
+        createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        startedAt TIMESTAMP NULL,
+        completedAt TIMESTAMP NULL,
+        INDEX idx_scan_jobs_status (status)
+      )
+    `));
+  } catch { /* exists */ }
+  try {
+    await db.execute(sql.raw(`
+      CREATE TABLE IF NOT EXISTS scan_artifacts (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        scanId INT NOT NULL,
+        tool VARCHAR(64) NOT NULL,
+        contentType VARCHAR(128) NOT NULL DEFAULT 'application/json',
+        storageKey VARCHAR(512) NOT NULL,
+        sizeBytes INT DEFAULT 0,
+        createdAt TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_artifacts_scan (scanId)
       )
     `));
   } catch { /* exists */ }
@@ -527,15 +598,22 @@ export async function getIntegrationByUser(userId: number) {
   return result[0];
 }
 
-export async function upsertIntegration(userId: number, configEnc: string) {
+export async function upsertIntegration(userId: number, configEnc: string, orgId?: number | null) {
   const db = await getDb();
   if (!db) throw new Error("DB unavailable");
   const existing = await getIntegrationByUser(userId);
   if (existing) {
-    await db.update(integrations).set({ configEnc }).where(eq(integrations.userId, userId));
+    await db.update(integrations).set({
+      configEnc,
+      ...(orgId != null ? { orgId } : {}),
+    }).where(eq(integrations.userId, userId));
     return existing.id;
   }
-  const result = await db.insert(integrations).values({ userId, configEnc } satisfies InsertIntegration);
+  const result = await db.insert(integrations).values({
+    userId,
+    configEnc,
+    orgId: orgId ?? null,
+  } satisfies InsertIntegration);
   return (result as any)[0]?.insertId as number;
 }
 
@@ -543,6 +621,22 @@ export async function deleteIntegration(userId: number) {
   const db = await getDb();
   if (!db) throw new Error("DB unavailable");
   await db.delete(integrations).where(eq(integrations.userId, userId));
+}
+
+export async function getIntegrationByOrg(orgId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const result = await db.select().from(integrations).where(eq(integrations.orgId, orgId)).limit(1);
+  return result[0];
+}
+
+/** Prefer org-shared config, fall back to user's personal config */
+export async function getIntegrationForUser(userId: number, orgId?: number | null) {
+  if (orgId) {
+    const orgRow = await getIntegrationByOrg(orgId);
+    if (orgRow) return orgRow;
+  }
+  return getIntegrationByUser(userId);
 }
 
 // ─── Organizations ────────────────────────────────────────────────────────────
@@ -672,4 +766,119 @@ export async function getScansByOrg(orgId: number, limit = 50) {
   const db = await getDb();
   if (!db) return [];
   return db.select().from(scans).where(eq(scans.orgId, orgId)).orderBy(desc(scans.createdAt)).limit(limit);
+}
+
+export async function getTargetByUrlAndOrg(url: string, orgId: number) {
+  const db = await getDb();
+  if (!db) return undefined;
+  const rows = await db.select().from(targets).where(and(eq(targets.orgId, orgId), eq(targets.url, url))).limit(1);
+  return rows[0];
+}
+
+// ─── Waivers ──────────────────────────────────────────────────────────────────
+export async function createFindingWaiver(data: InsertFindingWaiver) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  const fp = data.fingerprint || findingFingerprint(data);
+  try {
+    const result = await db.insert(findingWaivers).values({ ...data, fingerprint: fp });
+    return (result as any)[0]?.insertId as number;
+  } catch {
+    // upsert on unique (orgId, fingerprint)
+    await db.update(findingWaivers).set({
+      reason: data.reason,
+      expiresAt: data.expiresAt ?? null,
+      title: data.title,
+      category: data.category ?? null,
+      cweId: data.cweId ?? null,
+      userId: data.userId,
+    }).where(and(eq(findingWaivers.orgId, data.orgId), eq(findingWaivers.fingerprint, fp)));
+    const [row] = await db.select().from(findingWaivers)
+      .where(and(eq(findingWaivers.orgId, data.orgId), eq(findingWaivers.fingerprint, fp))).limit(1);
+    return row?.id ?? 0;
+  }
+}
+
+export async function listFindingWaivers(orgId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(findingWaivers).where(eq(findingWaivers.orgId, orgId)).orderBy(desc(findingWaivers.createdAt));
+}
+
+export async function deleteFindingWaiver(id: number, orgId: number) {
+  const db = await getDb();
+  if (!db) throw new Error("DB unavailable");
+  await db.delete(findingWaivers).where(and(eq(findingWaivers.id, id), eq(findingWaivers.orgId, orgId)));
+}
+
+export async function getActiveWaiverFingerprints(orgId: number): Promise<Set<string>> {
+  const rows = await listFindingWaivers(orgId);
+  const now = Date.now();
+  const set = new Set<string>();
+  for (const w of rows) {
+    if (w.expiresAt && new Date(w.expiresAt).getTime() < now) continue;
+    set.add(w.fingerprint);
+  }
+  return set;
+}
+
+// ─── Audit ────────────────────────────────────────────────────────────────────
+export async function writeAuditEvent(data: InsertAuditEvent) {
+  const db = await getDb();
+  if (!db) return;
+  try {
+    await db.insert(auditEvents).values(data);
+  } catch (err) {
+    console.warn("[audit] write failed:", (err as Error).message);
+  }
+}
+
+export async function listAuditEvents(orgId: number | null, limit = 100) {
+  const db = await getDb();
+  if (!db) return [];
+  if (orgId == null) {
+    return db.select().from(auditEvents).orderBy(desc(auditEvents.createdAt)).limit(limit);
+  }
+  return db.select().from(auditEvents).where(eq(auditEvents.orgId, orgId)).orderBy(desc(auditEvents.createdAt)).limit(limit);
+}
+
+// ─── Scan jobs (durable queue metadata) ───────────────────────────────────────
+export async function createScanJob(scanId: number, payload?: Record<string, unknown>) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.insert(scanJobs).values({
+    scanId,
+    status: "queued",
+    payload: payload ?? null,
+  } satisfies InsertScanJob);
+  return (result as any)[0]?.insertId as number;
+}
+
+export async function updateScanJobByScanId(
+  scanId: number,
+  patch: Partial<{ status: "queued" | "running" | "completed" | "failed"; errorMessage: string | null; startedAt: Date; completedAt: Date }>
+) {
+  const db = await getDb();
+  if (!db) return;
+  await db.update(scanJobs).set(patch).where(eq(scanJobs.scanId, scanId));
+}
+
+export async function listQueuedScanJobs(limit = 20) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(scanJobs).where(eq(scanJobs.status, "queued")).orderBy(scanJobs.createdAt).limit(limit);
+}
+
+// ─── Artifacts ────────────────────────────────────────────────────────────────
+export async function createScanArtifact(data: InsertScanArtifact) {
+  const db = await getDb();
+  if (!db) return null;
+  const result = await db.insert(scanArtifacts).values(data);
+  return (result as any)[0]?.insertId as number;
+}
+
+export async function listScanArtifacts(scanId: number) {
+  const db = await getDb();
+  if (!db) return [];
+  return db.select().from(scanArtifacts).where(eq(scanArtifacts.scanId, scanId)).orderBy(desc(scanArtifacts.createdAt));
 }

@@ -31,12 +31,22 @@ import {
   getTargetById,
   getTargetsByUser,
   createCicdApiKey,
+  createFindingWaiver,
   createOrganization,
+  deleteFindingWaiver,
   deleteIntegration,
   ensureUserOrg,
+  getActiveWaiverFingerprints,
   getIntegrationByUser,
+  getIntegrationForUser,
+  getScansByOrg,
+  getTargetByUrlAndOrg,
+  getTargetsByOrg,
+  listAuditEvents,
   listCicdApiKeys,
+  listFindingWaivers,
   listOrganizations,
+  listScanArtifacts,
   revokeCicdApiKey,
   setUserOrg,
   updateFindingStatus,
@@ -45,10 +55,13 @@ import {
   updateUserRole,
   upsertIntegration,
   validateCicdApiKey,
+  writeAuditEvent,
+  getOrganizationById,
 } from "./db";
 import { enqueueScanDetached, getScanQueueStats } from "./scanQueue";
 import type { Scan, ScanFinding, Target } from "../drizzle/schema";
 import { generateExecutiveSummary, generateJSONReport, generateMarkdownReport } from "./reportGenerator";
+import { generateSarifReport } from "./sarif";
 import { generatePdfReport } from "./pdfReport";
 import { runScan, analyzeAttackScenarios, type AuthScanConfig, type LoginCredentials } from "./scanEngine";
 import { pushFindingsToTicketing, type IntegrationsConfig, type TicketResult } from "./ticketingIntegration";
@@ -62,6 +75,8 @@ import {
   redactIntegrationsConfig,
 } from "./integrationsCrypto";
 import { LIGHT_DEFAULT_TOOLS } from "@shared/scanTools";
+import { findingFingerprint } from "./findingFingerprint";
+import { incCounter } from "./metrics";
 
 const httpUrl = z.string().max(2048).url().refine(isHttpUrl, "URL must use http or https");
 const httpsUrl = z.string().max(2048).url().refine(u => u.startsWith("https://") && isHttpUrl(u), "URL must use https");
@@ -125,11 +140,43 @@ const integrationsConfigSchema = z.object({
     teamId: z.string(),
     minSeverity: z.enum(["critical", "high", "medium", "low"]).default("high"),
   }).optional(),
+  webhooks: z.array(z.object({
+    url: httpsUrl,
+    secret: z.string().max(512).optional(),
+    type: z.enum(["slack", "teams", "generic"]).default("generic"),
+    events: z.array(z.enum(["scan.completed", "scan.failed", "gate.failed", "finding.critical"])).optional(),
+  })).max(10).optional(),
 });
 
-async function buildCicdStatusPayload(scanId: number, targetUrl: string, failThreshold: string) {
+async function buildCicdStatusPayload(
+  scanId: number,
+  targetUrl: string,
+  failThreshold: string,
+  opts?: { onlyNew?: boolean; orgId?: number | null }
+) {
   const scan = await getScanById(scanId);
-  const findings = await getFindingsByScan(scanId);
+  let findings = await getFindingsByScan(scanId);
+  // Ignore resolved / false_positive for gate decisions
+  findings = findings.filter((f) => f.status === "open" || f.status === "acknowledged");
+
+  // Apply org waivers
+  const orgId = opts?.orgId ?? scan?.orgId ?? null;
+  if (orgId) {
+    const waived = (await getActiveWaiverFingerprints(orgId)) || new Set<string>();
+    findings = findings.filter((f) => !waived.has(findingFingerprint(f)));
+  }
+
+  // Fail-on-new: only findings listed in trendSummary.newItems
+  if (opts?.onlyNew) {
+    const trend = scan?.trendSummary as { newItems?: string[] } | null;
+    const newTitles = new Set((trend?.newItems || []).map((t) => t.toLowerCase()));
+    if (newTitles.size > 0) {
+      findings = findings.filter((f) => newTitles.has(f.title.toLowerCase()));
+    } else if (scan?.status === "completed") {
+      // First scan / no baseline → treat all as new (keep findings)
+    }
+  }
+
   const severityOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
   const threshold = severityOrder[failThreshold] ?? 1;
   const failFindings = findings.filter((f) => (severityOrder[f.severity] ?? 4) <= threshold);
@@ -157,6 +204,7 @@ async function buildCicdStatusPayload(scanId: number, targetUrl: string, failThr
     riskLevel: scan?.riskLevel ?? "unknown",
     threshold: failThreshold,
     failOnSeverity: failThreshold,
+    onlyNew: !!opts?.onlyNew,
     totalFindings: findings.length,
     failingFindings: failFindings.length,
     counts,
@@ -214,6 +262,8 @@ function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFindin
     completedAt: new Date(),
     errorMessage: null,
     triggeredBy: "manual",
+    orgId: null,
+    parentFindingId: null,
     scenarios: null,
     trendSummary: null,
     createdAt: new Date(),
@@ -221,6 +271,7 @@ function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFindin
   const mockTarget: Target = {
     id: 0,
     userId: 0,
+    orgId: null,
     name: "Demo Application",
     url: "https://demo.example.com",
     repoUrl: null,
@@ -228,6 +279,9 @@ function getDemoReportData(): { scan: Scan; target: Target; findings: ScanFindin
     tags: null,
     scanFrequency: "manual",
     isActive: true,
+    authConfig: null,
+    openapiUrl: null,
+    manifestPath: null,
     lastScannedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -273,6 +327,16 @@ function assertOwnerOrAdmin(resourceUserId: number, ctxUser: { id: number; role:
   }
 }
 
+function assertOwnerOrgOrAdmin(
+  resource: { userId: number; orgId?: number | null },
+  ctxUser: { id: number; role: string; orgId?: number | null }
+) {
+  if (ctxUser.role === "admin") return;
+  if (resource.userId === ctxUser.id) return;
+  if (resource.orgId && ctxUser.orgId && resource.orgId === ctxUser.orgId) return;
+  throw new TRPCError({ code: "FORBIDDEN", message: "Access denied" });
+}
+
 export const appRouter = router({
   system: systemRouter,
 
@@ -290,6 +354,8 @@ export const appRouter = router({
   targets: router({
     list: protectedProcedure.query(async ({ ctx }) => {
       if (ctx.user.role === "admin") return getAllTargets();
+      const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+      if (orgId) return getTargetsByOrg(orgId);
       return getTargetsByUser(ctx.user.id);
     }),
 
@@ -391,14 +457,23 @@ export const appRouter = router({
           return getScansByTarget(input.targetId, input.limit);
         }
         if (ctx.user.role === "admin") return getAllScans(input.limit);
+        const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+        if (orgId) return getScansByOrg(orgId, input.limit);
         return getScansByUser(ctx.user.id, input.limit);
       }),
 
     get: protectedProcedure.input(z.object({ id: z.number() })).query(async ({ ctx, input }) => {
       const scan = await getScanById(input.id);
       if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
-      assertOwnerOrAdmin(scan.userId, ctx.user);
+      assertOwnerOrgOrAdmin(scan, ctx.user);
       return scan;
+    }),
+
+    artifacts: protectedProcedure.input(z.object({ scanId: z.number() })).query(async ({ ctx, input }) => {
+      const scan = await getScanById(input.scanId);
+      if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+      assertOwnerOrgOrAdmin(scan, ctx.user);
+      return listScanArtifacts(input.scanId);
     }),
 
     start: protectedProcedure
@@ -688,6 +763,23 @@ export const appRouter = router({
       return { pdfBase64: pdfBuffer.toString("base64"), title: report.title };
     }),
 
+    getSARIF: protectedProcedure.input(z.object({ scanId: z.number() })).query(async ({ ctx, input }) => {
+      const scan = await getScanById(input.scanId);
+      if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+      assertOwnerOrgOrAdmin(scan, ctx.user);
+      const target = await getTargetById(scan.targetId);
+      if (!target) throw new TRPCError({ code: "NOT_FOUND", message: "Target not found" });
+      const findings = await getFindingsByScan(input.scanId);
+      const report = await getReportByScan(input.scanId);
+      const reportData = {
+        scan,
+        target,
+        findings,
+        generatedAt: report?.generatedAt ?? new Date(),
+      };
+      return { sarif: generateSarifReport(reportData), title: report?.title ?? `Scan ${scan.id} SARIF` };
+    }),
+
     getDemoReport: publicProcedure.query(() => {
       const reportData = getDemoReportData();
       const title = `Penetration Test Report — ${reportData.target.name} — ${reportData.generatedAt.toLocaleDateString()} (Demo)`;
@@ -794,13 +886,14 @@ export const appRouter = router({
   // ─── Integrations ─────────────────────────────────────────────────────────
   integrations: router({
     get: protectedProcedure.query(async ({ ctx }) => {
-      const row = await getIntegrationByUser(ctx.user.id);
-      if (!row?.configEnc) return { configured: false, config: null as IntegrationsConfig | null };
+      const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+      const row = await getIntegrationForUser(ctx.user.id, orgId);
+      if (!row?.configEnc) return { configured: false, config: null as IntegrationsConfig | null, orgScoped: false };
       try {
         const config = redactIntegrationsConfig(decryptIntegrationsConfig(row.configEnc));
-        return { configured: true, config };
+        return { configured: true, config, orgScoped: !!row.orgId };
       } catch {
-        return { configured: false, config: null };
+        return { configured: false, config: null, orgScoped: false };
       }
     }),
 
@@ -808,8 +901,11 @@ export const appRouter = router({
       .input(z.object({ config: integrationsConfigSchema }))
       .mutation(async ({ ctx, input }) => {
         if (input.config.jira?.enabled) await assertSafeUrlInput(input.config.jira.baseUrl, ["https:"]);
-        // Merge secrets: if UI sent ******** keep previous secret
-        const existing = await getIntegrationByUser(ctx.user.id);
+        for (const wh of input.config.webhooks || []) {
+          await assertSafeUrlInput(wh.url, ["https:"]);
+        }
+        const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+        const existing = await getIntegrationForUser(ctx.user.id, orgId);
         let merged = input.config as IntegrationsConfig;
         if (existing?.configEnc) {
           try {
@@ -823,10 +919,27 @@ export const appRouter = router({
             if (merged.linear && merged.linear.apiKey === "********" && prev.linear) {
               merged = { ...merged, linear: { ...merged.linear, apiKey: prev.linear.apiKey } };
             }
+            if (merged.webhooks) {
+              merged = {
+                ...merged,
+                webhooks: merged.webhooks.map((w, i) =>
+                  w.secret === "********" && prev.webhooks?.[i]?.secret
+                    ? { ...w, secret: prev.webhooks[i].secret }
+                    : w
+                ),
+              };
+            }
           } catch { /* ignore */ }
         }
         const enc = encryptIntegrationsConfig(merged);
-        await upsertIntegration(ctx.user.id, enc);
+        await upsertIntegration(ctx.user.id, enc, orgId);
+        await writeAuditEvent({
+          orgId,
+          userId: ctx.user.id,
+          action: "integrations.save",
+          resourceType: "integrations",
+          resourceId: String(ctx.user.id),
+        });
         return { success: true };
       }),
 
@@ -834,6 +947,76 @@ export const appRouter = router({
       await deleteIntegration(ctx.user.id);
       return { success: true };
     }),
+  }),
+
+  // ─── Finding waivers ──────────────────────────────────────────────────────
+  waivers: router({
+    list: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+      if (!orgId) return [];
+      return listFindingWaivers(orgId);
+    }),
+    create: protectedProcedure
+      .input(z.object({
+        title: z.string().min(1).max(500),
+        category: z.string().max(100).optional(),
+        cweId: z.string().max(20).optional(),
+        reason: z.string().max(2000).optional(),
+        expiresAt: z.string().datetime().optional(),
+        findingId: z.number().optional(),
+      }))
+      .mutation(async ({ ctx, input }) => {
+        const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+        if (!orgId) throw new TRPCError({ code: "BAD_REQUEST", message: "No organization" });
+        let title = input.title;
+        let category = input.category;
+        let cweId = input.cweId;
+        if (input.findingId) {
+          const finding = await getFindingById(input.findingId);
+          if (!finding) throw new TRPCError({ code: "NOT_FOUND" });
+          const scan = await getScanById(finding.scanId);
+          if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
+          assertOwnerOrgOrAdmin(scan, ctx.user);
+          title = finding.title;
+          category = finding.category;
+          cweId = finding.cweId || undefined;
+          await updateFindingStatus(finding.id, "false_positive");
+        }
+        const id = await createFindingWaiver({
+          orgId,
+          userId: ctx.user.id,
+          fingerprint: findingFingerprint({ title, category, cweId }),
+          title,
+          category: category ?? null,
+          cweId: cweId ?? null,
+          reason: input.reason ?? null,
+          expiresAt: input.expiresAt ? new Date(input.expiresAt) : null,
+        });
+        await writeAuditEvent({
+          orgId,
+          userId: ctx.user.id,
+          action: "waiver.create",
+          resourceType: "waiver",
+          resourceId: String(id),
+          meta: { title },
+        });
+        return { success: true, id };
+      }),
+    delete: protectedProcedure
+      .input(z.object({ id: z.number() }))
+      .mutation(async ({ ctx, input }) => {
+        const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+        if (!orgId) throw new TRPCError({ code: "BAD_REQUEST", message: "No organization" });
+        await deleteFindingWaiver(input.id, orgId);
+        await writeAuditEvent({
+          orgId,
+          userId: ctx.user.id,
+          action: "waiver.delete",
+          resourceType: "waiver",
+          resourceId: String(input.id),
+        });
+        return { success: true };
+      }),
   }),
 
   // ─── Organizations ────────────────────────────────────────────────────────
@@ -845,17 +1028,46 @@ export const appRouter = router({
       const all = await listOrganizations();
       return all.filter((o) => o.id === orgId);
     }),
+    mine: protectedProcedure.query(async ({ ctx }) => {
+      const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+      if (!orgId) return null;
+      return (await getOrganizationById(orgId)) ?? null;
+    }),
     create: adminProcedure
       .input(z.object({ name: z.string().min(1).max(255), slug: z.string().min(1).max(100).regex(/^[a-z0-9-]+$/) }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
         const id = await createOrganization(input.name, input.slug);
+        await writeAuditEvent({
+          orgId: id,
+          userId: ctx.user.id,
+          action: "org.create",
+          resourceType: "organization",
+          resourceId: String(id),
+          meta: { name: input.name, slug: input.slug },
+        });
         return { success: true, id };
       }),
     assignUser: adminProcedure
       .input(z.object({ userId: z.number(), orgId: z.number() }))
-      .mutation(async ({ input }) => {
+      .mutation(async ({ ctx, input }) => {
         await setUserOrg(input.userId, input.orgId);
+        await writeAuditEvent({
+          orgId: input.orgId,
+          userId: ctx.user.id,
+          action: "org.assignUser",
+          resourceType: "user",
+          resourceId: String(input.userId),
+          meta: { orgId: input.orgId },
+        });
         return { success: true };
+      }),
+    audit: protectedProcedure
+      .input(z.object({ limit: listLimit.default(50) }))
+      .query(async ({ ctx, input }) => {
+        if (ctx.user.role === "admin") return listAuditEvents(null, input.limit);
+        const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
+        if (!orgId) return [];
+        return listAuditEvents(orgId, input.limit);
       }),
   }),
 
@@ -884,11 +1096,14 @@ export const appRouter = router({
     /** Async start — returns scanId immediately; poll with cicd.status */
     scan: publicProcedure
       .input(z.object({
-        targetUrl: httpUrl,
+        targetUrl: httpUrl.optional(),
+        targetId: z.number().optional(),
         tools: toolList.default([...LIGHT_DEFAULT_TOOLS]),
         scanMode: z.enum(["light", "full"]).default("light"),
         failOnSeverity: z.enum(["critical", "high", "medium", "low"]).optional(),
         failOn: z.enum(["critical", "high", "medium", "low"]).optional(),
+        /** When true, only new (regression) findings fail the gate */
+        onlyNew: z.boolean().default(false),
         apiKey: z.string().min(1).max(512),
         /** When true, wait for completion (legacy sync behavior, still queued) */
         wait: z.boolean().default(false),
@@ -896,32 +1111,79 @@ export const appRouter = router({
       .mutation(async ({ input }) => {
         const auth = await validateCicdApiKey(input.apiKey);
         if (!auth.ok) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid CI/CD API key" });
-        await assertSafeUrlInput(input.targetUrl);
+        incCounter("ghoststrike_cicd_scans_total");
+
+        let target = input.targetId ? await getTargetById(input.targetId) : undefined;
+        if (input.targetId && !target) throw new TRPCError({ code: "NOT_FOUND", message: "Target not found" });
+        if (target) {
+          if (auth.orgId && target.orgId && target.orgId !== auth.orgId) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Target not in API key org" });
+          }
+          if (auth.userId !== 0 && !auth.orgId && target.userId !== auth.userId) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Target access denied" });
+          }
+        }
+
+        const targetUrl = target?.url || input.targetUrl;
+        if (!targetUrl) throw new TRPCError({ code: "BAD_REQUEST", message: "targetUrl or targetId required" });
+        await assertSafeUrlInput(targetUrl);
+
+        // Auto-bind by URL within org when targetId omitted
+        if (!target && auth.orgId) {
+          target = await getTargetByUrlAndOrg(targetUrl, auth.orgId);
+        }
 
         const failThreshold = input.failOnSeverity ?? input.failOn ?? "high";
+        const boundTargetId = target?.id ?? 0;
+        const authConfig = target?.authConfig as AuthScanConfig | null | undefined;
         const scanId = await createScan({
-          targetId: 0,
-          userId: auth.userId,
+          targetId: boundTargetId,
+          userId: auth.userId || target?.userId || 0,
           tools: input.tools.join(","),
           scanMode: input.scanMode,
           triggeredBy: "cicd",
-          orgId: auth.orgId,
+          orgId: auth.orgId ?? target?.orgId ?? null,
           status: "queued",
         });
 
-        const job = () => runScan(scanId, 0, input.targetUrl, input.tools, input.scanMode);
+        await writeAuditEvent({
+          orgId: auth.orgId ?? target?.orgId ?? null,
+          userId: auth.userId || null,
+          action: "cicd.scan",
+          resourceType: "scan",
+          resourceId: String(scanId),
+          meta: { targetId: boundTargetId, targetUrl, onlyNew: input.onlyNew },
+        });
+
+        const job = () =>
+          runScan(
+            scanId,
+            boundTargetId,
+            targetUrl,
+            input.tools,
+            input.scanMode,
+            authConfig || undefined,
+            target?.manifestPath || undefined,
+            authConfig?.loginCredentials,
+            target?.repoUrl || undefined,
+            target?.openapiUrl || undefined
+          );
+
+        const gateOpts = { onlyNew: input.onlyNew, orgId: auth.orgId ?? target?.orgId ?? null };
 
         if (input.wait) {
           const { enqueueScan } = await import("./scanQueue");
           await enqueueScan(job);
-          return buildCicdStatusPayload(scanId, input.targetUrl, failThreshold);
+          return buildCicdStatusPayload(scanId, targetUrl, failThreshold, gateOpts);
         }
 
         enqueueScanDetached(job);
         return {
           scanId,
+          targetId: boundTargetId || null,
           status: "queued" as const,
           failOnSeverity: failThreshold,
+          onlyNew: input.onlyNew,
           queue: getScanQueueStats(),
           message: "Scan queued. Poll cicd.status until status is completed or failed.",
         };
@@ -932,6 +1194,7 @@ export const appRouter = router({
         scanId: z.number(),
         apiKey: z.string().min(1).max(512),
         failOnSeverity: z.enum(["critical", "high", "medium", "low"]).default("high"),
+        onlyNew: z.boolean().default(false),
       }))
       .query(async ({ input }) => {
         const auth = await validateCicdApiKey(input.apiKey);
@@ -939,7 +1202,6 @@ export const appRouter = router({
         const scan = await getScanById(input.scanId);
         if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
         if (auth.userId !== 0 && scan.userId !== auth.userId && auth.userId !== 0) {
-          // env key (userId 0) can read any CI scan; DB keys only their own
           if (scan.userId !== auth.userId) throw new TRPCError({ code: "FORBIDDEN" });
         }
         if (scan.status !== "completed" && scan.status !== "failed") {
@@ -952,7 +1214,15 @@ export const appRouter = router({
             exitCode: null,
           };
         }
-        return buildCicdStatusPayload(scan.id, "(stored)", input.failOnSeverity);
+        const payload = await buildCicdStatusPayload(
+          scan.id,
+          "(stored)",
+          input.failOnSeverity,
+          { onlyNew: input.onlyNew, orgId: auth.orgId ?? scan.orgId }
+        );
+        if (!payload.passed) incCounter("ghoststrike_cicd_gate_failures_total");
+        else incCounter("ghoststrike_cicd_gate_passes_total");
+        return payload;
       }),
   }),
 

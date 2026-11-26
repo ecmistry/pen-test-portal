@@ -46,10 +46,19 @@ export interface LinearConfig {
   minSeverity: "critical" | "high" | "medium" | "low";
 }
 
+export interface WebhookConfig {
+  url: string;
+  secret?: string;
+  events?: Array<"scan.completed" | "scan.failed" | "gate.failed" | "finding.critical">;
+  type?: "slack" | "teams" | "generic";
+}
+
 export interface IntegrationsConfig {
   jira?: JiraConfig;
   github?: GitHubConfig;
   linear?: LinearConfig;
+  /** Org/team notification endpoints */
+  webhooks?: WebhookConfig[];
 }
 
 export interface TicketResult {

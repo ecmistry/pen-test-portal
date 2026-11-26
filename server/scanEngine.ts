@@ -4555,6 +4555,60 @@ export async function runScan(
     if (trendSummary) {
       await log(scanId, "success", `Trend: +${trendSummary.newFindings} new, -${trendSummary.resolvedFindings} resolved, ${trendSummary.persistingFindings} persisting`, "complete");
     }
+
+    // Persist summary artifact + fire webhooks (best-effort)
+    try {
+      const { storeArtifact } = await import("./artifactStore");
+      const { createScanArtifact, getIntegrationForUser, getScanById: getScanAgain } = await import("./db");
+      const { dispatchWebhooks } = await import("./webhooks");
+      const { decryptIntegrationsConfig } = await import("./integrationsCrypto");
+      const summary = JSON.stringify({
+        scanId,
+        targetUrl,
+        score,
+        riskLevel,
+        counts,
+        findings: allFindings.map((f) => ({ title: f.title, severity: f.severity, category: f.category })),
+        trendSummary,
+      }, null, 2);
+      const stored = await storeArtifact(scanId, "summary", summary);
+      await createScanArtifact({
+        scanId,
+        tool: "summary",
+        contentType: "application/json",
+        storageKey: stored.storageKey,
+        sizeBytes: stored.sizeBytes,
+      });
+      const finished = await getScanAgain(scanId);
+      const integ = await getIntegrationForUser(finished?.userId || 0, finished?.orgId);
+      let config = null;
+      if (integ?.configEnc) {
+        try { config = decryptIntegrationsConfig(integ.configEnc); } catch { /* ignore */ }
+      }
+      await dispatchWebhooks(config, {
+        event: "scan.completed",
+        scanId,
+        targetUrl,
+        status: "completed",
+        securityScore: score,
+        riskLevel,
+        criticalCount: counts.critical,
+        highCount: counts.high,
+        message: `Scan #${scanId} completed — score ${score}/100 (${riskLevel})`,
+      });
+      if (counts.critical > 0) {
+        await dispatchWebhooks(config, {
+          event: "finding.critical",
+          scanId,
+          targetUrl,
+          status: "completed",
+          criticalCount: counts.critical,
+          message: `Scan #${scanId} found ${counts.critical} critical finding(s)`,
+        });
+      }
+    } catch (hookErr) {
+      await log(scanId, "info", `Post-scan hooks skipped: ${(hookErr as Error).message}`, "complete");
+    }
   } catch (err: any) {
     await log(scanId, "error", `Scan failed: ${err.message}`, "error");
     await updateScan(scanId, {
@@ -4562,5 +4616,23 @@ export async function runScan(
       completedAt: new Date(),
       errorMessage: err.message,
     });
+    try {
+      const { getIntegrationForUser, getScanById: getScanAgain } = await import("./db");
+      const { dispatchWebhooks } = await import("./webhooks");
+      const { decryptIntegrationsConfig } = await import("./integrationsCrypto");
+      const finished = await getScanAgain(scanId);
+      const integ = await getIntegrationForUser(finished?.userId || 0, finished?.orgId);
+      let config = null;
+      if (integ?.configEnc) {
+        try { config = decryptIntegrationsConfig(integ.configEnc); } catch { /* ignore */ }
+      }
+      await dispatchWebhooks(config, {
+        event: "scan.failed",
+        scanId,
+        targetUrl,
+        status: "failed",
+        message: `Scan #${scanId} failed: ${err.message}`,
+      });
+    } catch { /* ignore */ }
   }
 }

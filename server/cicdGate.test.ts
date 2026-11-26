@@ -10,6 +10,19 @@ function shouldFail(
   return order.slice(0, idx + 1).some((k) => counts[k] > 0);
 }
 
+describe("CI fail-on-new filter", () => {
+  it("keeps only titles in newItems", () => {
+    const findings = [
+      { title: "Old XSS", severity: "high" },
+      { title: "Brand New SSRF", severity: "high" },
+    ];
+    const newItems = new Set(["brand new ssrf"]);
+    const filtered = findings.filter((f) => newItems.has(f.title.toLowerCase()));
+    expect(filtered).toHaveLength(1);
+    expect(filtered[0].title).toBe("Brand New SSRF");
+  });
+});
+
 describe("CI failOnSeverity gate", () => {
   it("fails on high when high present", () => {
     expect(shouldFail({ critical: 0, high: 1, medium: 0, low: 0 }, "high")).toBe(true);

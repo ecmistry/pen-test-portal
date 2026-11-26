@@ -36,6 +36,9 @@ async function startServer() {
 
   // Mark any scans left "running" or "queued" by a previous process as failed (e.g. after restart/crash)
   await db.failStaleScansOnStartup().catch((err) => console.warn("[Startup] failStaleScansOnStartup:", err.message));
+  await import("../scanQueue")
+    .then(({ recoverScanJobsOnBoot }) => recoverScanJobsOnBoot())
+    .catch((err) => console.warn("[Startup] recoverScanJobsOnBoot:", err?.message || err));
 
   const app = express();
   const server = createServer(app);
@@ -45,6 +48,15 @@ async function startServer() {
   registerOAuthRoutes(app);
   registerDevAuthRoutes(app);
   registerAdminAuthRoutes(app);
+
+  // Prometheus metrics
+  app.get("/metrics", async (_req, res) => {
+    const { renderPrometheus } = await import("../metrics");
+    const { getScanQueueStats } = await import("../scanQueue");
+    getScanQueueStats();
+    res.setHeader("Content-Type", "text/plain; version=0.0.4; charset=utf-8");
+    res.end(renderPrometheus());
+  });
 
   // SSE live scan logs: GET /api/scans/:id/logs/stream?afterId=0
   app.get("/api/scans/:id/logs/stream", async (req, res) => {

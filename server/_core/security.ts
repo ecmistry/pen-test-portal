@@ -70,4 +70,24 @@ export function applySecurityMiddleware(app: Express) {
     legacyHeaders: false,
   });
   app.use("/api", apiLimiter);
+
+  // Stricter limiter for CI scan starts (keyed by body apiKey prefix when present)
+  const cicdLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 30,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    keyGenerator: (req) => {
+      try {
+        const body = typeof req.body === "object" && req.body ? req.body : {};
+        const json = (body as any).json || body;
+        const key = typeof json?.apiKey === "string" ? json.apiKey.slice(0, 16) : "";
+        return key || req.ip || "cicd";
+      } catch {
+        return req.ip || "cicd";
+      }
+    },
+    message: { error: "CI/CD rate limit exceeded" },
+  });
+  app.use("/api/trpc/cicd.scan", cicdLimiter);
 }

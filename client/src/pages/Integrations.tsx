@@ -31,6 +31,16 @@ export default function Integrations() {
   const [linTeam, setLinTeam] = useState("");
   const [linMin, setLinMin] = useState<Severity>("high");
 
+  const [whUrl, setWhUrl] = useState("");
+  const [whType, setWhType] = useState<"slack" | "teams" | "generic">("slack");
+  const [whSecret, setWhSecret] = useState("");
+  const [webhookList, setWebhookList] = useState<
+    Array<{ url: string; type: "slack" | "teams" | "generic"; secret?: string }>
+  >([]);
+
+  const [waiverTitle, setWaiverTitle] = useState("");
+  const [waiverReason, setWaiverReason] = useState("");
+
   useEffect(() => {
     const c = data?.config;
     if (!c) return;
@@ -53,6 +63,15 @@ export default function Integrations() {
       setLinKey(c.linear.apiKey || "");
       setLinTeam(c.linear.teamId || "");
       setLinMin(c.linear.minSeverity || "high");
+    }
+    if (c.webhooks?.length) {
+      setWebhookList(
+        c.webhooks.map((w) => ({
+          url: w.url,
+          type: (w.type || "generic") as "slack" | "teams" | "generic",
+          secret: w.secret,
+        }))
+      );
     }
   }, [data]);
 
@@ -121,9 +140,37 @@ export default function Integrations() {
               minSeverity: linMin,
             }
           : undefined,
+        webhooks: webhookList.length
+          ? webhookList.map((w) => ({
+              url: w.url,
+              type: w.type,
+              secret: w.secret || "********",
+              events: ["scan.completed", "scan.failed", "gate.failed", "finding.critical"] as Array<
+                "scan.completed" | "scan.failed" | "gate.failed" | "finding.critical"
+              >,
+            }))
+          : undefined,
       },
     });
   }
+
+  const { data: waivers } = trpc.waivers.list.useQuery();
+  const createWaiverMutation = trpc.waivers.create.useMutation({
+    onSuccess: () => {
+      utils.waivers.list.invalidate();
+      setWaiverTitle("");
+      setWaiverReason("");
+      toast.success("Waiver created");
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const deleteWaiverMutation = trpc.waivers.delete.useMutation({
+    onSuccess: () => {
+      utils.waivers.list.invalidate();
+      toast.success("Waiver removed");
+    },
+    onError: (e) => toast.error(e.message),
+  });
 
   return (
     <AppLayout title="Integrations">
@@ -221,6 +268,111 @@ export default function Integrations() {
                 <Trash2 className="w-4 h-4 mr-2" /> Clear
               </Button>
             </div>
+
+            <section className="space-y-3 rounded-xl border border-border p-4">
+              <h3 className="font-medium text-foreground">Webhooks (Slack / Teams)</h3>
+              <p className="text-xs text-muted-foreground">
+                Org-shared notifications for scan complete/fail and critical findings. Config is stored with integrations.
+                {data?.orgScoped ? " · Currently org-scoped" : ""}
+              </p>
+              <div className="grid gap-2 sm:grid-cols-3">
+                <div className="sm:col-span-2">
+                  <Label className="text-sm">Webhook URL</Label>
+                  <Input value={whUrl} onChange={(e) => setWhUrl(e.target.value)} placeholder="https://hooks.slack.com/..." />
+                </div>
+                <div>
+                  <Label className="text-sm">Type</Label>
+                  <select
+                    className="w-full h-9 rounded-md border border-border bg-input px-2 text-sm"
+                    value={whType}
+                    onChange={(e) => setWhType(e.target.value as any)}
+                  >
+                    <option value="slack">Slack</option>
+                    <option value="teams">Teams</option>
+                    <option value="generic">Generic</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <Label className="text-sm">Signing secret (optional)</Label>
+                <Input type="password" value={whSecret} onChange={(e) => setWhSecret(e.target.value)} />
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  if (!whUrl) return;
+                  setWebhookList((prev) => [...prev, { url: whUrl, type: whType, secret: whSecret || undefined }]);
+                  setWhUrl("");
+                  setWhSecret("");
+                }}
+              >
+                Add webhook
+              </Button>
+              <div className="divide-y divide-border rounded-lg border border-border">
+                {webhookList.map((w, i) => (
+                  <div key={`${w.url}-${i}`} className="flex items-center justify-between gap-3 p-3 text-sm">
+                    <div className="min-w-0">
+                      <div className="text-foreground truncate">{w.url}</div>
+                      <div className="text-xs text-muted-foreground">{w.type}</div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => setWebhookList((prev) => prev.filter((_, idx) => idx !== i))}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+                {!webhookList.length && (
+                  <div className="p-3 text-xs text-muted-foreground">No webhooks configured</div>
+                )}
+              </div>
+            </section>
+
+            <section className="space-y-3 rounded-xl border border-border p-4">
+              <h3 className="font-medium text-foreground">Finding waivers</h3>
+              <p className="text-xs text-muted-foreground">
+                Suppress known findings across scans and CI gates (org-scoped fingerprint).
+              </p>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <div>
+                  <Label className="text-sm">Title</Label>
+                  <Input value={waiverTitle} onChange={(e) => setWaiverTitle(e.target.value)} placeholder="Exact finding title" />
+                </div>
+                <div>
+                  <Label className="text-sm">Reason</Label>
+                  <Input value={waiverReason} onChange={(e) => setWaiverReason(e.target.value)} />
+                </div>
+              </div>
+              <Button
+                size="sm"
+                disabled={!waiverTitle || createWaiverMutation.isPending}
+                onClick={() =>
+                  createWaiverMutation.mutate({ title: waiverTitle, reason: waiverReason || undefined })
+                }
+              >
+                Add waiver
+              </Button>
+              <div className="divide-y divide-border rounded-lg border border-border">
+                {(waivers ?? []).map((w) => (
+                  <div key={w.id} className="flex items-center justify-between gap-3 p-3 text-sm">
+                    <div className="min-w-0">
+                      <div className="text-foreground truncate">{w.title}</div>
+                      <div className="text-xs text-muted-foreground font-mono truncate">{w.fingerprint}</div>
+                    </div>
+                    <Button size="sm" variant="outline" onClick={() => deleteWaiverMutation.mutate({ id: w.id })}>
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+                {!waivers?.length && (
+                  <div className="p-3 text-xs text-muted-foreground">No waivers</div>
+                )}
+              </div>
+            </section>
 
             <section className="space-y-3 rounded-xl border border-border p-4">
               <h3 className="font-medium text-foreground">CI/CD API keys</h3>

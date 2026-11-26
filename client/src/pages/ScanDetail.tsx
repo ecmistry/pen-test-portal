@@ -95,6 +95,13 @@ export default function ScanDetail() {
     },
     onError: (e) => toast.error(e.message),
   });
+  const waiveFinding = trpc.waivers.create.useMutation({
+    onSuccess: () => {
+      utils.scans.findings.invalidate({ scanId });
+      toast.success("Finding waived for future scans/CI");
+    },
+    onError: (e) => toast.error(e.message),
+  });
 
   const [sseLogs, setSseLogs] = useState<any[] | null>(null);
 
@@ -377,6 +384,17 @@ export default function ScanDetail() {
                               }}
                             >
                               Retest
+                            </button>
+                            <button
+                              type="button"
+                              className="text-xs text-amber-400 hover:text-amber-300 px-1"
+                              title="Waive across future scans / CI"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                waiveFinding.mutate({ findingId: f.id, reason: "Waived from scan detail" });
+                              }}
+                            >
+                              Waive
                             </button>
                             {expandedFinding === f.id ? <ChevronUp className="w-4 h-4 text-muted-foreground" /> : <ChevronDown className="w-4 h-4 text-muted-foreground" />}
                           </div>

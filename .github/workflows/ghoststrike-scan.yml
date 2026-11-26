@@ -19,16 +19,34 @@ jobs:
           PORTAL_URL: ${{ secrets.GHOSTSTRIKE_URL }}
           API_KEY: ${{ secrets.GHOSTSTRIKE_CICD_API_KEY }}
           TARGET_URL: ${{ github.event.inputs.target_url || secrets.GHOSTSTRIKE_TARGET_URL }}
+          TARGET_ID: ${{ secrets.GHOSTSTRIKE_TARGET_ID }}
+          ONLY_NEW: ${{ vars.GHOSTSTRIKE_ONLY_NEW }}
         run: |
           set -euo pipefail
           if [ -z "${PORTAL_URL:-}" ] || [ -z "${API_KEY:-}" ] || [ -z "${TARGET_URL:-}" ]; then
             echo "Missing GHOSTSTRIKE_URL / GHOSTSTRIKE_CICD_API_KEY / GHOSTSTRIKE_TARGET_URL secrets"
             exit 1
           fi
-          # tRPC HTTP: POST /api/trpc/cicd.scan with JSON input wrapper
+          export ONLY_NEW="${ONLY_NEW:-true}"
+          PAYLOAD=$(python3 - <<'PY'
+import json, os
+d={
+  "targetUrl": os.environ["TARGET_URL"],
+  "scanMode": "light",
+  "failOnSeverity": "high",
+  "apiKey": os.environ["API_KEY"],
+  "wait": False,
+  "onlyNew": os.environ.get("ONLY_NEW","true").lower()=="true",
+}
+tid=(os.environ.get("TARGET_ID") or "").strip()
+if tid.isdigit():
+  d["targetId"]=int(tid)
+print(json.dumps({"json": d}))
+PY
+)
           RESP=$(curl -sS -X POST "${PORTAL_URL%/}/api/trpc/cicd.scan" \
             -H "content-type: application/json" \
-            -d "{\"json\":{\"targetUrl\":\"${TARGET_URL}\",\"scanMode\":\"light\",\"failOnSeverity\":\"high\",\"apiKey\":\"${API_KEY}\",\"wait\":false}}")
+            -d "$PAYLOAD")
           echo "$RESP" | tee /tmp/gs-start.json
           SCAN_ID=$(python3 -c "import json,sys; d=json.load(open('/tmp/gs-start.json')); print(d.get('result',d).get('data',d).get('json',d).get('scanId') or d.get('result',{}).get('data',{}).get('scanId') or '')")
           if [ -z "$SCAN_ID" ]; then
@@ -62,7 +80,7 @@ PY
         run: |
           set -euo pipefail
           for i in $(seq 1 90); do
-            RESP=$(curl -sS "${PORTAL_URL%/}/api/trpc/cicd.status?input=$(python3 -c "import urllib.parse,json; print(urllib.parse.quote(json.dumps({'json':{'scanId':int('${SCAN_ID}'),'apiKey':'${API_KEY}','failOnSeverity':'high'}})))")")
+            RESP=$(curl -sS "${PORTAL_URL%/}/api/trpc/cicd.status?input=$(python3 -c "import urllib.parse,json; print(urllib.parse.quote(json.dumps({'json':{'scanId':int('${SCAN_ID}'),'apiKey':'${API_KEY}','failOnSeverity':'high','onlyNew':True}})))")")
             echo "$RESP" > /tmp/gs-status.json
             STATUS=$(python3 - <<'PY'
 import json

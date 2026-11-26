@@ -4,9 +4,11 @@ import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { useLocation } from "wouter";
+import { useState } from "react";
 import {
   Users, Shield, Zap, Target, FileText, AlertTriangle, Loader2, Lock, BarChart3, RefreshCw,
 } from "lucide-react";
+import { Input } from "@/components/ui/input";
 
 export default function AdminPanel() {
   const { user } = useAuth();
@@ -18,6 +20,26 @@ export default function AdminPanel() {
   const { data: allScans } = trpc.admin.allScans.useQuery({ limit: 20 });
   const { data: queueStats } = trpc.admin.scanQueueStats.useQuery(undefined, {
     refetchInterval: 5000,
+  });
+  const { data: orgs } = trpc.orgs.list.useQuery();
+  const { data: auditEvents } = trpc.orgs.audit.useQuery({ limit: 30 });
+  const [newOrgName, setNewOrgName] = useState("");
+  const [newOrgSlug, setNewOrgSlug] = useState("");
+  const createOrgMutation = trpc.orgs.create.useMutation({
+    onSuccess: () => {
+      utils.orgs.list.invalidate();
+      setNewOrgName("");
+      setNewOrgSlug("");
+      toast.success("Organization created");
+    },
+    onError: (e) => toast.error(e.message),
+  });
+  const assignOrgMutation = trpc.orgs.assignUser.useMutation({
+    onSuccess: () => {
+      utils.admin.users.invalidate();
+      toast.success("User org updated");
+    },
+    onError: (e) => toast.error(e.message),
   });
 
   const updateRoleMutation = trpc.admin.updateUserRole.useMutation({
@@ -160,11 +182,75 @@ export default function AdminPanel() {
                       <option value="user">User</option>
                       <option value="admin">Admin</option>
                     </select>
+                    <select
+                      value={u.orgId ?? ""}
+                      onChange={(e) => {
+                        const orgId = Number(e.target.value);
+                        if (orgId) assignOrgMutation.mutate({ userId: u.id, orgId });
+                      }}
+                      className="text-xs bg-input border border-border rounded px-2 py-1 text-foreground max-w-[140px]"
+                    >
+                      <option value="">Org…</option>
+                      {(orgs ?? []).map((o) => (
+                        <option key={o.id} value={o.id}>{o.name}</option>
+                      ))}
+                    </select>
                   </div>
                 </div>
               ))}
             </div>
           )}
+        </div>
+
+        <div className="bg-card border border-border rounded-xl p-5 space-y-3">
+          <h3 className="text-sm font-semibold text-foreground">Organizations</h3>
+          <div className="flex flex-wrap gap-2 items-end">
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">Name</div>
+              <Input value={newOrgName} onChange={(e) => setNewOrgName(e.target.value)} className="h-9" />
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground mb-1">Slug</div>
+              <Input
+                value={newOrgSlug}
+                onChange={(e) => setNewOrgSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+                className="h-9"
+                placeholder="acme-corp"
+              />
+            </div>
+            <Button
+              size="sm"
+              disabled={!newOrgName || !newOrgSlug || createOrgMutation.isPending}
+              onClick={() => createOrgMutation.mutate({ name: newOrgName, slug: newOrgSlug })}
+            >
+              Create org
+            </Button>
+          </div>
+          <div className="text-xs text-muted-foreground">
+            {(orgs ?? []).map((o) => `${o.name} (${o.slug})`).join(" · ") || "No orgs"}
+          </div>
+        </div>
+
+        <div className="bg-card border border-border rounded-xl overflow-hidden">
+          <div className="px-5 py-4 border-b border-border/50">
+            <h3 className="text-sm font-semibold text-foreground">Audit trail</h3>
+          </div>
+          <div className="divide-y divide-border/50 max-h-64 overflow-y-auto">
+            {(auditEvents ?? []).map((ev) => (
+              <div key={ev.id} className="px-5 py-2.5 text-xs flex gap-3">
+                <span className="text-muted-foreground shrink-0 w-36">
+                  {new Date(ev.createdAt).toLocaleString()}
+                </span>
+                <span className="text-foreground font-medium">{ev.action}</span>
+                <span className="text-muted-foreground truncate">
+                  {ev.resourceType}/{ev.resourceId}
+                </span>
+              </div>
+            ))}
+            {!auditEvents?.length && (
+              <div className="py-6 text-center text-muted-foreground text-sm">No audit events yet.</div>
+            )}
+          </div>
         </div>
 
         {/* Recent scans across all users */}

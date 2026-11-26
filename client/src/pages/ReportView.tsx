@@ -38,6 +38,10 @@ export default function ReportView() {
     { scanId },
     { enabled: false }
   );
+  const { refetch: fetchSarif, isFetching: isSarifLoading } = trpc.reports.getSARIF.useQuery(
+    { scanId },
+    { enabled: false }
+  );
 
   if (isLoading) {
     return (
@@ -82,6 +86,17 @@ export default function ReportView() {
     const result = await fetchPdf();
     if (result.data?.pdfBase64) {
       downloadPdfFromBase64(result.data.pdfBase64, `pentest-report-scan-${scanId}.pdf`);
+    }
+  }
+
+  async function handleDownloadSarif() {
+    const result = await fetchSarif();
+    if (result.data?.sarif) {
+      downloadFile(
+        JSON.stringify(result.data.sarif, null, 2),
+        `pentest-report-scan-${scanId}.sarif.json`,
+        "application/sarif+json"
+      );
     }
   }
 
@@ -130,6 +145,20 @@ export default function ReportView() {
               disabled={!jsonData}
             >
               <Code className="w-3.5 h-3.5" /> JSON
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-border text-foreground hover:bg-accent gap-1.5"
+              onClick={handleDownloadSarif}
+              disabled={isSarifLoading}
+            >
+              {isSarifLoading ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <FileText className="w-3.5 h-3.5" />
+              )}{" "}
+              SARIF
             </Button>
           </div>
         </div>

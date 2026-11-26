@@ -164,10 +164,11 @@ export const schedules = mysqlTable("schedules", {
 export type Schedule = typeof schedules.$inferSelect;
 export type InsertSchedule = typeof schedules.$inferInsert;
 
-// ─── Integrations (ticketing) ─────────────────────────────────────────────────
+// ─── Integrations (ticketing + webhooks; org-scoped preferred) ───────────────
 export const integrations = mysqlTable("integrations", {
   id: int("id").autoincrement().primaryKey(),
   userId: int("userId").notNull().unique(),
+  orgId: int("orgId"),
   /** AES-GCM encrypted IntegrationsConfig JSON */
   configEnc: text("configEnc").notNull(),
   createdAt: timestamp("createdAt").defaultNow().notNull(),
@@ -176,6 +177,67 @@ export const integrations = mysqlTable("integrations", {
 
 export type Integration = typeof integrations.$inferSelect;
 export type InsertIntegration = typeof integrations.$inferInsert;
+
+// ─── Finding waivers (org-scoped suppressions by fingerprint) ─────────────────
+export const findingWaivers = mysqlTable("finding_waivers", {
+  id: int("id").autoincrement().primaryKey(),
+  orgId: int("orgId").notNull(),
+  userId: int("userId").notNull(),
+  fingerprint: varchar("fingerprint", { length: 255 }).notNull(),
+  title: varchar("title", { length: 500 }).notNull(),
+  category: varchar("category", { length: 100 }),
+  cweId: varchar("cweId", { length: 20 }),
+  reason: text("reason"),
+  expiresAt: timestamp("expiresAt"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type FindingWaiver = typeof findingWaivers.$inferSelect;
+export type InsertFindingWaiver = typeof findingWaivers.$inferInsert;
+
+// ─── Audit events ─────────────────────────────────────────────────────────────
+export const auditEvents = mysqlTable("audit_events", {
+  id: int("id").autoincrement().primaryKey(),
+  orgId: int("orgId"),
+  userId: int("userId"),
+  action: varchar("action", { length: 100 }).notNull(),
+  resourceType: varchar("resourceType", { length: 64 }),
+  resourceId: varchar("resourceId", { length: 64 }),
+  meta: json("meta"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type AuditEvent = typeof auditEvents.$inferSelect;
+export type InsertAuditEvent = typeof auditEvents.$inferInsert;
+
+// ─── Durable scan jobs (survives process restart metadata) ────────────────────
+export const scanJobs = mysqlTable("scan_jobs", {
+  id: int("id").autoincrement().primaryKey(),
+  scanId: int("scanId").notNull(),
+  status: mysqlEnum("status", ["queued", "running", "completed", "failed"]).default("queued").notNull(),
+  payload: json("payload"),
+  errorMessage: text("errorMessage"),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+  startedAt: timestamp("startedAt"),
+  completedAt: timestamp("completedAt"),
+});
+
+export type ScanJob = typeof scanJobs.$inferSelect;
+export type InsertScanJob = typeof scanJobs.$inferInsert;
+
+// ─── Scanner artifacts (raw tool output paths/keys) ───────────────────────────
+export const scanArtifacts = mysqlTable("scan_artifacts", {
+  id: int("id").autoincrement().primaryKey(),
+  scanId: int("scanId").notNull(),
+  tool: varchar("tool", { length: 64 }).notNull(),
+  contentType: varchar("contentType", { length: 128 }).default("application/json").notNull(),
+  storageKey: varchar("storageKey", { length: 512 }).notNull(),
+  sizeBytes: int("sizeBytes").default(0),
+  createdAt: timestamp("createdAt").defaultNow().notNull(),
+});
+
+export type ScanArtifact = typeof scanArtifacts.$inferSelect;
+export type InsertScanArtifact = typeof scanArtifacts.$inferInsert;
 
 // ─── CI/CD API keys (hashed at rest) ──────────────────────────────────────────
 export const cicdApiKeys = mysqlTable("cicd_api_keys", {

@@ -12,6 +12,10 @@ const mockDb = vi.hoisted(() => {
     "ensureUserOrg", "listOrganizations", "createOrganization", "setUserOrg",
     "createCicdApiKey", "listCicdApiKeys", "revokeCicdApiKey", "validateCicdApiKey",
     "updateScan", "getLogsAfterId",
+    "getActiveWaiverFingerprints", "getIntegrationForUser", "getScansByOrg", "getTargetByUrlAndOrg",
+    "getTargetsByOrg", "listAuditEvents", "listFindingWaivers", "listScanArtifacts",
+    "createFindingWaiver", "deleteFindingWaiver", "writeAuditEvent", "getOrganizationById",
+    "createScanJob", "updateScanJobByScanId", "listQueuedScanJobs", "createScanArtifact",
   ];
   return Object.fromEntries(names.map((n) => [n, vi.fn()]));
 });
