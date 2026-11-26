@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { assertSafeOutboundUrl, isHttpUrl, isPrivateAddress, runTool } from "./netSafety";
+import { assertHostAllowed, assertSafeOutboundUrl, isHttpUrl, isPrivateAddress, runTool, safeLookup } from "./netSafety";
 
 afterEach(() => {
   delete process.env.ALLOW_PRIVATE_TARGETS;
@@ -69,5 +69,27 @@ describe("runTool", () => {
 
   it("rejects when the executable does not exist", async () => {
     await expect(runTool("definitely-not-a-real-binary-xyz", [])).rejects.toThrow();
+  });
+});
+
+describe("safeLookup / assertHostAllowed", () => {
+  const lookupAsync = (host: string) =>
+    new Promise<string>((resolve, reject) =>
+      safeLookup(host, {}, (err, address) => (err ? reject(err) : resolve(address as string)))
+    );
+
+  it("refuses hostnames that resolve to loopback", async () => {
+    await expect(lookupAsync("localhost")).rejects.toThrow(/internal address/);
+  });
+
+  it("resolves public hostnames", async () => {
+    await expect(lookupAsync("example.com")).resolves.toMatch(/\d|:/);
+  });
+
+  it("blocks private IP literals", () => {
+    expect(() => assertHostAllowed("169.254.169.254")).toThrow();
+    expect(() => assertHostAllowed("[::1]")).toThrow();
+    expect(() => assertHostAllowed("8.8.8.8")).not.toThrow();
+    expect(() => assertHostAllowed("example.com")).not.toThrow();
   });
 });

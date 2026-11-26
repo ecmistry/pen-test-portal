@@ -41,7 +41,9 @@ import https from "https";
 import http from "http";
 import { URL } from "url";
 import { appendScanLog, createFindings, updateScan, updateTarget, getPreviousCompletedScan, getFindingsByScan } from "./db";
-import { assertSafeOutboundUrl, runTool } from "./netSafety";
+import { assertHostAllowed, assertSafeOutboundUrl, runTool, safeLookup } from "./netSafety";
+
+const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 import { InsertScanFinding } from "../drizzle/schema";
 import { getPenTestCache } from "./penTestUpdater";
 import { enrichFinding } from "./findingEnrichment";
@@ -236,9 +238,16 @@ async function httpGet(
     const parsed = new URL(path.startsWith("http") ? path : targetUrl + path);
     const isHttps = parsed.protocol === "https:";
     const lib = isHttps ? https : http;
+    try {
+      assertHostAllowed(parsed.hostname);
+    } catch (err) {
+      reject(err);
+      return;
+    }
 
     const reqOptions = {
       hostname: parsed.hostname,
+      lookup: safeLookup,
       port: parsed.port || (isHttps ? 443 : 80),
       path: parsed.pathname + parsed.search,
       method: options.method || "GET",
@@ -254,14 +263,23 @@ async function httpGet(
 
     const req = lib.request(reqOptions, (res) => {
       let body = "";
-      res.on("data", (chunk) => (body += chunk));
-      res.on("end", () => {
+      let received = 0;
+      const finish = () =>
         resolve({
           status: res.statusCode || 0,
           headers: res.headers as Record<string, string>,
           body,
         });
+      res.on("data", (chunk: Buffer) => {
+        received += chunk.length;
+        if (received > MAX_RESPONSE_BYTES) {
+          res.destroy();
+          finish();
+          return;
+        }
+        body += chunk;
       });
+      res.on("end", finish);
     });
 
     req.on("error", reject);
@@ -1774,7 +1792,8 @@ async function testSSLTLS(scanId: number, targetUrl: string, _cookies?: string):
         fingerprint256: string;
       };
     }>((resolve, reject) => {
-      const socket = tls.connect({ host: hostname, port, servername: hostname, rejectUnauthorized: false, timeout: 10000 }, () => {
+      assertHostAllowed(hostname);
+      const socket = tls.connect({ host: hostname, port, servername: hostname, lookup: safeLookup, rejectUnauthorized: false, timeout: 10000 }, () => {
         const protocol = socket.getProtocol?.() ?? "unknown";
         const cipherInfo = socket.getCipher?.();
         const cert = socket.getPeerCertificate?.();
@@ -2775,8 +2794,15 @@ async function testHTTPSmuggling(scanId: number, targetUrl: string, _cookies?: s
   async function sendRaw(headers: Record<string, string>, body: string, label: string): Promise<void> {
     return new Promise((resolve) => {
       const startTime = Date.now();
+      try {
+        assertHostAllowed(parsed.hostname);
+      } catch {
+        resolve();
+        return;
+      }
       const req = lib.request({
         hostname: parsed.hostname,
+        lookup: safeLookup,
         port,
         path: "/",
         method: "POST",
@@ -4008,6 +4034,9 @@ export async function runScan(
             await log(scanId, "info", `Wapiti found ${toolFindings.length} finding(s)`, "wapiti");
           } catch (err) {
             await log(scanId, "warn", `Wapiti scan failed or not installed: ${(err as Error).message}`, "wapiti");
+          } finally {
+            const { rm } = await import("fs/promises");
+            await rm(wapitiOut, { force: true }).catch(() => {});
           }
           break;
         }

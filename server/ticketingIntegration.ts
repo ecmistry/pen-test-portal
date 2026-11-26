@@ -196,6 +196,7 @@ async function jiraRequest(
       "Accept": "application/json",
     },
     body: body ? JSON.stringify(body) : undefined,
+    redirect: "error",
   });
 
   const data = response.headers.get("content-type")?.includes("json")

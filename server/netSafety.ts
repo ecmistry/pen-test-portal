@@ -1,4 +1,5 @@
 import { execFile } from "child_process";
+import { lookup as dnsLookup, type LookupAddress, type LookupOptions } from "dns";
 import { lookup } from "dns/promises";
 import { BlockList, isIP } from "net";
 
@@ -44,6 +45,33 @@ export class UnsafeUrlError extends Error {}
 
 function privateTargetsAllowed() {
   return process.env.ALLOW_PRIVATE_TARGETS === "true";
+}
+
+type LookupCallback = (err: NodeJS.ErrnoException | null, address: string | LookupAddress[], family?: number) => void;
+
+/**
+ * Drop-in `lookup` for http/https/tls that refuses to connect to internal
+ * addresses. Checking at connect time also covers redirects, absolute-URL
+ * probes and DNS rebinding.
+ */
+export function safeLookup(hostname: string, options: LookupOptions | number, callback: LookupCallback) {
+  const opts: LookupOptions = typeof options === "number" ? { family: options } : (options ?? {});
+  dnsLookup(hostname, { ...opts, all: true }, (err, addresses) => {
+    if (err) return callback(err, []);
+    if (!privateTargetsAllowed() && (addresses.length === 0 || addresses.some(a => isPrivateAddress(a.address)))) {
+      return callback(new UnsafeUrlError(`Blocked connection to internal address for ${hostname}`), []);
+    }
+    if (opts.all) return callback(null, addresses);
+    callback(null, addresses[0].address, addresses[0].family);
+  });
+}
+
+/** For IP-literal hosts, where Node skips `lookup` entirely. */
+export function assertHostAllowed(hostname: string) {
+  const host = hostname.replace(/^\[|\]$/g, "");
+  if (!privateTargetsAllowed() && isIP(host) && isPrivateAddress(host)) {
+    throw new UnsafeUrlError(`Blocked connection to internal address ${host}`);
+  }
 }
 
 /**

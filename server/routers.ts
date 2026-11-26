@@ -359,7 +359,7 @@ export const appRouter = router({
             }).optional(),
             github: z.object({
               enabled: z.boolean(),
-              repo: z.string(),
+              repo: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/, "repo must be owner/name"),
               token: z.string(),
               minSeverity: z.enum(["critical", "high", "medium", "low"]).default("high"),
               labels: z.array(z.string()).optional(),
