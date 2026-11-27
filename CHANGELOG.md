@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Self pen-test in full suite**: `pnpm test:self-pentest` / `pnpm test:full` scans Ghoststrike via `cicd.scan` (`scripts/self-pentest.mjs`). Procedure and remediation steps in `SELF_PENTEST_RUNBOOK.md`.
 - **Why Ghoststrike PDF**: Docs page offers a short downloadable stakeholder brief (`why-ghoststrike-is-useful.pdf`) plus the full portal overview PDF; overview PDF now opens with a “Why useful” section.
 - **AWS credential exposure detection**: Secret-leak and recon detect `AKIA`/`ASIA` access key IDs, named AWS profiles, and `/.aws/credentials` paths (SPA-safe). Optional `CANARY_AWS_KEY_PREFIXES` tags known honeytokens (`honeytoken=true`); keys are never validated via AWS APIs. Attack scenario **S-012** chains SSRF + AWS disclosure. Full mode with `repoUrl` always includes the secrets tool. See `canaries.md` for the related infra honeytoken plan (out of portal scope).
 - **GitHub clone token UI**: Integrations page can store an encrypted PAT for private-repo SAST/SCA/secrets clones (env `GITHUB_TOKEN` still overrides when set).

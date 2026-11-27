@@ -11,6 +11,8 @@
     "format": "prettier --write .",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "test:self-pentest": "node scripts/self-pentest.mjs",
+    "test:full": "pnpm test && pnpm test:self-pentest",
     "db:push": "drizzle-kit generate && drizzle-kit migrate",
     "db:migrate": "drizzle-kit migrate"
   },

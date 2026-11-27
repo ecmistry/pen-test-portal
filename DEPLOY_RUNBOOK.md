@@ -181,6 +181,7 @@ Track these so they are not forgotten after a “green” HTTP check.
 | [`deploy/README.md`](deploy/README.md) | EC2 layout, nginx, SSL, optional scanners |
 | [`EC2_SETUP.md`](EC2_SETUP.md) | Dev-oriented setup on this host |
 | [`docs/PENTEST_METHODOLOGY.md`](docs/PENTEST_METHODOLOGY.md) | How scans work + daily 03:00 UTC intel cron |
+| [`SELF_PENTEST_RUNBOOK.md`](SELF_PENTEST_RUNBOOK.md) | Self-scan Ghoststrike + remediation procedure (`pnpm test:full`) |
 | [`canaries.md`](canaries.md) | Infra AWS honeytoken plan (not deployed by Ghoststrike) |
 | [`CHANGELOG.md`](CHANGELOG.md) | What changed in recent releases |
 
@@ -195,6 +196,7 @@ Track these so they are not forgotten after a “green” HTTP check.
 - [ ] MySQL container healthy
 - [ ] Logs show ScheduleRunner + CapabilityUpdater started
 - [ ] Known weaknesses above reviewed (no new regressions in journalctl)
+- [ ] Optional: `pnpm test:full` (or light `pnpm test:self-pentest`) gate passes — see [SELF_PENTEST_RUNBOOK.md](SELF_PENTEST_RUNBOOK.md)
 
 ---
 
