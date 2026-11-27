@@ -74,6 +74,27 @@ describe("analyzeAttackScenarios", () => {
     expect(match).toBeDefined();
   });
 
+  it("detects S-012 cloud credential theft when SSRF + AWS disclosure", () => {
+    const findings = [
+      { category: "SSRF", title: "SSRF to AWS metadata" },
+      { category: "Information Disclosure", title: "Exposed AWS access key ID (AKIA****MPLE) at /.aws/credentials" },
+    ];
+    const scenarios = analyzeAttackScenarios(findings);
+    const match = scenarios.find((s) => s.id === "S-012");
+    expect(match).toBeDefined();
+    expect(match!.title).toMatch(/Cloud credential theft/i);
+    expect(match!.impact).toBe("Critical");
+  });
+
+  it("does not fire S-012 for unrelated Information Disclosure", () => {
+    const findings = [
+      { category: "SSRF", title: "SSRF to internal host" },
+      { category: "Information Disclosure", title: "robots.txt accessible" },
+    ];
+    const scenarios = analyzeAttackScenarios(findings);
+    expect(scenarios.find((s) => s.id === "S-012")).toBeUndefined();
+  });
+
   it("detects TLS man-in-the-middle scenario", () => {
     const findings = [
       { category: "TLS", title: "TLS 1.0 supported" },
@@ -442,6 +463,16 @@ describe("hasFileSpecificContent", () => {
 
   it("handles paths with query strings", () => {
     expect(hasFileSpecificContent("/.env.bak", "SECRET_KEY=abc123")).toBe(true);
+  });
+
+  it("returns true for AWS credentials file content", () => {
+    const body = "[backup-prod]\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n";
+    expect(hasFileSpecificContent("/.aws/credentials", body)).toBe(true);
+    expect(hasFileSpecificContent("/home/ec2-user/.aws/credentials", body)).toBe(true);
+  });
+
+  it("returns false for AWS path with HTML SPA fallback", () => {
+    expect(hasFileSpecificContent("/.aws/credentials", "<!doctype html><html>404</html>")).toBe(false);
   });
 });
 

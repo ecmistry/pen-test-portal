@@ -40,7 +40,7 @@ DAST tests the running application by sending HTTP requests and analysing respon
 | **Auth** | Brute force protection, account enumeration, session/cookie handling |
 | **SQLi** | SQL injection via error-based and behavioural probes (PayloadsAllTheThings-sourced) |
 | **XSS** | Reflected cross-site scripting including polyglot payloads |
-| **Recon** | Sensitive file exposure (.env, .git/config, backups), technology fingerprinting, SPA-aware false positive filtering |
+| **Recon** | Sensitive file exposure (.env, .git/config, `/.aws/credentials`, backups), technology fingerprinting, SPA-aware false positive filtering |
 
 ### Extended Checks (Full Mode)
 
@@ -54,7 +54,7 @@ DAST tests the running application by sending HTTP requests and analysing respon
 | **GraphQL** | Endpoint detection, introspection, batch query abuse, injection |
 | **SSRF** | Server-Side Request Forgery via URL/redirect/callback parameter injection |
 | **AI Prompt Injection** | Jailbreak prompts, guardrail bypass, toxicity filter obfuscation on LLM endpoints |
-| **Secret Exposure** | Credential leakage (clientSecret, apiKey, password, tokens) in API responses |
+| **Secret Exposure** | Credential leakage (clientSecret, apiKey, password, tokens) plus AWS AKIA/ASIA keys and credentials-file shapes; optional canary key-prefix tagging |
 | **URL Normalisation Bypass** | Percent-encoding, double-slash, dot-segment, hostname tricks to bypass ACLs |
 | **Insecure HTTP Client** | trustAll(true), verifyHost(false), H2C upgrade, rejectUnauthorized(false) in policy configs |
 | **JWT Security** | alg:none bypass, expired token acceptance, weak HMAC detection |

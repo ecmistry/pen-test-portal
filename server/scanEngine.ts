@@ -49,6 +49,12 @@ import { getPenTestCache } from "./penTestUpdater";
 import { enrichFinding } from "./findingEnrichment";
 import { buildThreatIntelForTexts } from "./vulnIntel";
 import {
+  awsCredentialsRemediation,
+  describeAwsKeyExposure,
+  extractAwsKeyHits,
+  looksLikeAwsCredentialsFile,
+} from "./awsCredentialDetect";
+import {
   type FindingConfidence,
   type ProbeTarget,
   normalizeFindingKey,
@@ -1363,6 +1369,9 @@ export function hasFileSpecificContent(path: string, body: string): boolean {
   const b = body.substring(0, 2000);
   const lowerTrimmed = b.trim().toLowerCase();
   const isHtml = lowerTrimmed.startsWith("<!doctype") || lowerTrimmed.startsWith("<html");
+  if (path.includes(".aws/credentials") || path.includes(".aws/config") || path.includes("/.aws/")) {
+    return looksLikeAwsCredentialsFile(body) && !isHtml;
+  }
   if (path.includes(".env")) {
     return /^[A-Z_][A-Z0-9_]*\s*=/m.test(b) && !isHtml;
   }
@@ -1437,6 +1446,12 @@ const SENSITIVE_PATHS_FULL = [
   { path: "/openapi.json", name: "OpenAPI spec", critical: false },
   { path: "/graphql", name: "GraphQL endpoint", critical: false },
   { path: "/.well-known/acme-challenge/", name: "ACME challenge", critical: false },
+  // AWS credential files (honeytoken / canary threat model — detect exposure, never validate keys via AWS APIs)
+  { path: "/.aws/credentials", name: "AWS credentials file", critical: true },
+  { path: "/.aws/config", name: "AWS config file", critical: true },
+  { path: "/root/.aws/credentials", name: "Root AWS credentials", critical: true },
+  { path: "/home/ec2-user/.aws/credentials", name: "ec2-user AWS credentials", critical: true },
+  { path: "/home/ubuntu/.aws/credentials", name: "ubuntu AWS credentials", critical: true },
 ];
 
 async function testIntelligenceGathering(scanId: number, targetUrl: string, scanMode: ScanMode, cookies?: string): Promise<Finding[]> {
@@ -1482,20 +1497,51 @@ async function testIntelligenceGathering(scanId: number, targetUrl: string, scan
       }
 
       // Non-HTML 200: could be real file exposure
-      if (critical && (path.includes(".env") || path.includes(".git") || path.includes("phpinfo"))) {
-        findings.push({
-          category: "Information Disclosure",
-          severity: "critical",
-          title: `${name} accessible at ${path}`,
-          description: `Sensitive file ${path} is publicly accessible (non-HTML response).`,
-          evidence: `HTTP ${status}, Content-Type: ${contentType}\n${body.substring(0, 200)}`,
-          recommendation: `Immediately restrict access to ${path}. Remove from web root.`,
-          cweId: "CWE-538",
-          owaspCategory: "A05:2021 – Security Misconfiguration",
-          affectedUrl: `${targetUrl}${path}`,
-          affectedComponent: "Sensitive File Exposure",
-        });
-        await log(scanId, "error", `CRITICAL: ${name} exposed at ${path}`, "recon");
+      const isAwsCredPath = path.includes(".aws/");
+      if (critical && (path.includes(".env") || path.includes(".git") || path.includes("phpinfo") || isAwsCredPath)) {
+        // For AWS credential files, require file-specific content to avoid SPA noise
+        if (isAwsCredPath && !hasFileSpecificContent(path, body)) {
+          await log(scanId, "info", `AWS path ${path} returned 200 without credentials content — suppressed`, "recon");
+          continue;
+        }
+        const awsHits = isAwsCredPath ? extractAwsKeyHits(body) : [];
+        if (isAwsCredPath && awsHits.length > 0) {
+          for (const hit of awsHits) {
+            const desc = describeAwsKeyExposure(hit);
+            findings.push({
+              category: "Information Disclosure",
+              severity: desc.severity,
+              title: `${desc.title} at ${path}`,
+              description: desc.description,
+              evidence: `HTTP ${status}, Content-Type: ${contentType}\n${desc.evidenceExtra}\nBody preview: ${body.substring(0, 120).replace(/(AKIA|ASIA)[0-9A-Z]{12}/g, "$1****")}`,
+              recommendation: awsCredentialsRemediation(hit.isHoneytoken),
+              cweId: "CWE-200",
+              owaspCategory: "A01:2021 – Broken Access Control",
+              affectedUrl: `${targetUrl}${path}`,
+              affectedComponent: "AWS Credentials Exposure",
+              confidence: hit.isHoneytoken ? "confirmed" : "likely",
+            });
+          }
+          await log(scanId, "error", `CRITICAL: AWS credentials exposed at ${path}`, "recon");
+        } else {
+          findings.push({
+            category: "Information Disclosure",
+            severity: "critical",
+            title: `${name} accessible at ${path}`,
+            description: isAwsCredPath
+              ? `AWS credentials/config file ${path} is publicly accessible. Never place keys in [default] or AWS_* env vars on instance-role hosts.`
+              : `Sensitive file ${path} is publicly accessible (non-HTML response).`,
+            evidence: `HTTP ${status}, Content-Type: ${contentType}\n${body.substring(0, 200)}`,
+            recommendation: isAwsCredPath
+              ? awsCredentialsRemediation(false)
+              : `Immediately restrict access to ${path}. Remove from web root.`,
+            cweId: isAwsCredPath ? "CWE-200" : "CWE-538",
+            owaspCategory: isAwsCredPath ? "A01:2021 – Broken Access Control" : "A05:2021 – Security Misconfiguration",
+            affectedUrl: `${targetUrl}${path}`,
+            affectedComponent: isAwsCredPath ? "AWS Credentials Exposure" : "Sensitive File Exposure",
+          });
+          await log(scanId, "error", `CRITICAL: ${name} exposed at ${path}`, "recon");
+        }
       } else if (!critical) {
         findings.push({
           category: "Information Disclosure",
@@ -2669,6 +2715,18 @@ const SCENARIO_TEMPLATES: ScenarioTemplate[] = [
     impact: "High",
     stepRoles: ["IDOR allows cross-user data access", "Exposed data reveals sensitive information"],
   },
+  {
+    id: "S-012",
+    title: "Cloud credential theft via SSRF to instance metadata",
+    objective: "Steal cloud instance credentials via SSRF to IMDS and abuse exposed AWS keys",
+    requiredCategories: [["SSRF"], ["Information Disclosure"]],
+    likelihood: "High",
+    impact: "Critical",
+    stepRoles: [
+      "SSRF reaches cloud metadata or internal credential endpoints",
+      "Exposed AWS keys or credential material amplify cloud takeover",
+    ],
+  },
 ];
 
 export function analyzeAttackScenarios(findings: Pick<Finding, "category" | "title">[]): AttackScenario[] {
@@ -2680,6 +2738,8 @@ export function analyzeAttackScenarios(findings: Pick<Finding, "category" | "tit
     else categoryFindings.set(f.category, [f.title]);
   }
 
+  const AWS_DISCLOSURE_RE = /aws|akia|asia|credentials profile|access key/i;
+
   for (const template of SCENARIO_TEMPLATES) {
     const matchedSteps: { findingTitle: string; role: string }[] = [];
     let allMatched = true;
@@ -2689,11 +2749,18 @@ export function analyzeAttackScenarios(findings: Pick<Finding, "category" | "tit
       let found = false;
       for (const cat of alts) {
         const catFindings = categoryFindings.get(cat);
-        if (catFindings && catFindings.length > 0) {
-          matchedSteps.push({ findingTitle: catFindings[0], role: template.stepRoles[i] });
+        if (!catFindings || catFindings.length === 0) continue;
+        // S-012: Information Disclosure step must be AWS credential-related
+        if (template.id === "S-012" && cat === "Information Disclosure") {
+          const awsTitle = catFindings.find((t) => AWS_DISCLOSURE_RE.test(t));
+          if (!awsTitle) continue;
+          matchedSteps.push({ findingTitle: awsTitle, role: template.stepRoles[i] });
           found = true;
           break;
         }
+        matchedSteps.push({ findingTitle: catFindings[0], role: template.stepRoles[i] });
+        found = true;
+        break;
       }
       if (!found) { allMatched = false; break; }
     }
@@ -2932,6 +2999,7 @@ async function testAIPromptInjection(scanId: number, targetUrl: string, cookies?
 
 async function testSecretExposure(scanId: number, targetUrl: string, cookies?: string): Promise<Finding[]> {
   const findings: Finding[] = [];
+  // Never call AWS with discovered keys to validate them (burns keys / trips canaries).
   await log(scanId, "info", `Testing for secret/credential exposure in API responses for ${targetUrl}`, "secret-leak");
 
   const apiPaths = [
@@ -2942,6 +3010,7 @@ async function testSecretExposure(scanId: number, targetUrl: string, cookies?: s
     "/api/auth/providers", "/api/identity-providers",
     "/api/dcr", "/api/v1/dcr",
     "/api/integrations", "/api/connections",
+    "/.aws/credentials", "/.env",
   ];
 
   const secretPatterns = [
@@ -2957,7 +3026,45 @@ async function testSecretExposure(scanId: number, targetUrl: string, cookies?: s
   for (const path of apiPaths) {
     try {
       const res = await httpGet(targetUrl, path, { cookies, timeout: 8000 });
-      if (res.status === 200 && res.body.startsWith("{") || res.body.startsWith("[")) {
+      if (res.status !== 200 || !res.body) continue;
+
+      // AWS access key IDs / credentials-file shapes (JSON or text) — mask only, never validate via AWS
+      const awsHits = extractAwsKeyHits(res.body);
+      for (const hit of awsHits) {
+        const desc = describeAwsKeyExposure(hit);
+        findings.push({
+          category: "Information Disclosure",
+          severity: desc.severity,
+          title: `${desc.title} at ${path}`,
+          description: desc.description,
+          evidence: `Endpoint: GET ${path}\n${desc.evidenceExtra}`,
+          recommendation: awsCredentialsRemediation(hit.isHoneytoken),
+          cweId: "CWE-200",
+          owaspCategory: "A01:2021 – Broken Access Control",
+          affectedUrl: `${targetUrl}${path}`,
+          affectedComponent: "AWS Credentials Exposure",
+          confidence: hit.isHoneytoken ? "confirmed" : "likely",
+        });
+      }
+      if (!awsHits.length && looksLikeAwsCredentialsFile(res.body)) {
+        findings.push({
+          category: "Information Disclosure",
+          severity: "critical",
+          title: `Exposed AWS credentials profile at ${path}`,
+          description:
+            "Response body looks like an AWS credentials/config file (named profile and aws_access_key_id). " +
+            "Ghoststrike does not validate keys against AWS APIs.",
+          evidence: `Endpoint: GET ${path}\nBody preview: ${res.body.substring(0, 160).replace(/(AKIA|ASIA)[0-9A-Z]{12}/g, "$1****")}`,
+          recommendation: awsCredentialsRemediation(false),
+          cweId: "CWE-200",
+          owaspCategory: "A01:2021 – Broken Access Control",
+          affectedUrl: `${targetUrl}${path}`,
+          affectedComponent: "AWS Credentials Exposure",
+          confidence: "likely",
+        });
+      }
+
+      if (res.body.startsWith("{") || res.body.startsWith("[")) {
         for (const pat of secretPatterns) {
           const match = res.body.match(pat.regex);
           if (match) {
@@ -4821,6 +4928,12 @@ export async function runScan(
   const toolsToRun = Array.from(new Set(toolList.map((t) => t.toLowerCase().trim())));
   if (scanMode === "full") {
     for (const t of ["cors", "traversal", "config", "logic", "graphql", "ssrf", "tls", "auth-roles", "sca", "sast", "secrets", "ai-prompt", "secret-leak", "url-norm", "http-client", "jwt", "cookie-flags", "smuggling", "crlf", "redirect", "proto-pollution", "nikto", "nuclei", "wapiti", "zap"]) {
+      if (!toolsToRun.includes(t)) toolsToRun.push(t);
+    }
+  }
+  // Full + repoUrl: always run secrets (and prefer sast/sca) so AWS keys in git are not skipped
+  if (scanMode === "full" && repoUrl) {
+    for (const t of ["secrets", "sast", "sca"]) {
       if (!toolsToRun.includes(t)) toolsToRun.push(t);
     }
   }

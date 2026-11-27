@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **AWS credential exposure detection**: Secret-leak and recon detect `AKIA`/`ASIA` access key IDs, named AWS profiles, and `/.aws/credentials` paths (SPA-safe). Optional `CANARY_AWS_KEY_PREFIXES` tags known honeytokens (`honeytoken=true`); keys are never validated via AWS APIs. Attack scenario **S-012** chains SSRF + AWS disclosure. Full mode with `repoUrl` always includes the secrets tool. See `canaries.md` for the related infra honeytoken plan (out of portal scope).
 - **GitHub clone token UI**: Integrations page can store an encrypted PAT for private-repo SAST/SCA/secrets clones (env `GITHUB_TOKEN` still overrides when set).
 - **GITHUB_CLASSIC_TOKEN env alias**: Scanner accepts a classic PAT via `GITHUB_CLASSIC_TOKEN` when `GITHUB_TOKEN` is unset (useful when fine-grained tokens lack org/repo access).
 - **Shared Git clone for SAST/SCA/secrets**: Full-mode repo scans clone once and reuse the workspace for Semgrep, lockfile discovery, Trivy/OSV SCA, and Gitleaks. Targets support optional `repoBranch`, `repoRef`, and `repoSubpath`; set `GITHUB_TOKEN` for private GitHub clones.

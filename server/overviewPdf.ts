@@ -134,7 +134,7 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
       ["Auth", "Brute-force protection, account enumeration, session/cookie handling"],
       ["SQLi", "SQL injection via error-based and behavioural probes (PayloadsAllTheThings)"],
       ["XSS", "Reflected cross-site scripting including polyglot payloads"],
-      ["Recon", "Sensitive file exposure (.env, .git), fingerprinting, SPA-aware FP filtering"],
+      ["Recon", "Sensitive file exposure (.env, .git, /.aws/credentials), fingerprinting, SPA FP filtering"],
     ]
   );
   addSubheading("Extended checks (Full mode)");
@@ -149,7 +149,7 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
       ["GraphQL", "Endpoint detection, introspection, batch abuse, injection"],
       ["SSRF", "URL/redirect/callback parameter injection"],
       ["AI Prompt Injection", "Jailbreak / guardrail bypass probes on LLM endpoints"],
-      ["Secret Exposure", "Credential leakage in API responses"],
+      ["Secret Exposure", "API secrets plus AWS AKIA/ASIA keys; optional canary key-prefix tagging"],
       ["URL Normalisation Bypass", "Encoding, double-slash, dot-segment ACL bypass tricks"],
       ["Insecure HTTP Client", "trustAll, verifyHost false, H2C, rejectUnauthorized"],
       ["JWT Security", "alg:none, expired token acceptance, weak HMAC"],
