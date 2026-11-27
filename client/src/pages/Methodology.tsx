@@ -19,13 +19,22 @@ function downloadPdfFromBase64(pdfBase64: string, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-function DownloadOverviewButton() {
-  const { refetch, isFetching } = trpc.system.getOverviewPdf.useQuery(undefined, {
-    enabled: false,
-  });
+function DocsHeader({ showNavHome }: { showNavHome?: boolean }) {
+  const whyPdf = trpc.system.getWhyGhoststrikePdf.useQuery(undefined, { enabled: false });
+  const overviewPdf = trpc.system.getOverviewPdf.useQuery(undefined, { enabled: false });
 
-  async function handleDownload() {
-    const result = await refetch();
+  async function downloadWhy() {
+    const result = await whyPdf.refetch();
+    if (result.data?.pdfBase64) {
+      downloadPdfFromBase64(
+        result.data.pdfBase64,
+        result.data.filename || "why-ghoststrike-is-useful.pdf"
+      );
+    }
+  }
+
+  async function downloadOverview() {
+    const result = await overviewPdf.refetch();
     if (result.data?.pdfBase64) {
       downloadPdfFromBase64(
         result.data.pdfBase64,
@@ -35,25 +44,6 @@ function DownloadOverviewButton() {
   }
 
   return (
-    <Button
-      variant="outline"
-      size="sm"
-      onClick={handleDownload}
-      disabled={isFetching}
-      className="gap-2"
-    >
-      {isFetching ? (
-        <Loader2 className="w-4 h-4 animate-spin" />
-      ) : (
-        <Download className="w-4 h-4" />
-      )}
-      Download portal overview PDF
-    </Button>
-  );
-}
-
-function DocsHeader({ showNavHome }: { showNavHome?: boolean }) {
-  return (
     <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
       <div>
         <h1 className="text-2xl font-bold text-foreground">
@@ -61,10 +51,39 @@ function DocsHeader({ showNavHome }: { showNavHome?: boolean }) {
         </h1>
         <p className="text-muted-foreground mt-1">
           How Ghoststrike tests your applications, which tools and sources it uses, and which standards we follow.
-          Download the portal overview PDF for a detailed stakeholder-ready summary.
+          Download the short “Why Ghoststrike is useful” brief for stakeholders, or the full portal overview PDF.
         </p>
       </div>
-      <DownloadOverviewButton />
+      <div className="flex flex-col sm:flex-row gap-2 shrink-0">
+        <Button
+          variant="default"
+          size="sm"
+          onClick={downloadWhy}
+          disabled={whyPdf.isFetching}
+          className="gap-2"
+        >
+          {whyPdf.isFetching ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <Download className="w-4 h-4" />
+          )}
+          Why Ghoststrike is useful (PDF)
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={downloadOverview}
+          disabled={overviewPdf.isFetching}
+          className="gap-2"
+        >
+          {overviewPdf.isFetching ? (
+            <Loader2 className="w-4 h-4 animate-spin" />
+          ) : (
+            <Download className="w-4 h-4" />
+          )}
+          Full portal overview (PDF)
+        </Button>
+      </div>
     </div>
   );
 }

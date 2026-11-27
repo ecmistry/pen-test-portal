@@ -6,6 +6,17 @@ Ghoststrike is an automated penetration testing portal that combines **Dynamic A
 
 The platform is accessible at [ghoststrike.tech](https://ghoststrike.tech) and produces professional-grade reports aligned with industry standards including OWASP Top 10:2021, PTES, NIST SP 800-115, CWE Top 25, CVSSv3.1, MITRE ATT&CK, OWASP API Security Top 10:2023, and ISO/IEC 27001.
 
+### Why it is useful
+
+- Continuous automated testing between infrequent manual pentests (light or full, on demand or scheduled)
+- DAST plus optional SAST/SCA/secrets, including authenticated and multi-role coverage
+- Findings mapped to industry standards with PDF/Markdown/JSON/SARIF exports
+- Daily 03:00 UTC security-intel refresh (Nuclei, PayloadsAllTheThings, CISA KEV, EPSS, Trivy DB)
+- CI gates, waivers, webhooks, and ticketing so issues reach engineering backlogs
+- AWS key / `.aws` exposure detection with optional honeytoken prefix tagging (keys are never validated via AWS APIs)
+
+Download **Why Ghoststrike is useful (PDF)** or the **full portal overview (PDF)** from [Docs](https://ghoststrike.tech/methodology).
+
 ---
 
 ## How It Works

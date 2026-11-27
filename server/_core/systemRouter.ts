@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { z } from "zod";
 import { generateOverviewPdf } from "../overviewPdf";
+import { generateWhyGhoststrikePdf } from "../whyGhoststrikePdf";
 import { notifyOwner } from "./notification";
 import { adminProcedure, publicProcedure, router } from "./trpc";
 
@@ -25,6 +26,16 @@ export const systemRouter = router({
       pdfBase64: pdfBuffer.toString("base64"),
       title: "Ghoststrike Portal Overview",
       filename: "ghoststrike-portal-overview.pdf",
+    };
+  }),
+
+  /** Short stakeholder brief: why Ghoststrike is useful. */
+  getWhyGhoststrikePdf: publicProcedure.query(() => {
+    const pdfBuffer = generateWhyGhoststrikePdf(new Date());
+    return {
+      pdfBase64: pdfBuffer.toString("base64"),
+      title: "Why Ghoststrike is useful",
+      filename: "why-ghoststrike-is-useful.pdf",
     };
   }),
 

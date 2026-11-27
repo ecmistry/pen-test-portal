@@ -67,6 +67,17 @@ describe("system.getOverviewPdf", () => {
   });
 });
 
+describe("system.getWhyGhoststrikePdf", () => {
+  it("returns why-useful pdf without auth", async () => {
+    const ctx = createContext(null);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.system.getWhyGhoststrikePdf();
+    expect(result.title).toBe("Why Ghoststrike is useful");
+    expect(result.filename).toBe("why-ghoststrike-is-useful.pdf");
+    expect(Buffer.from(result.pdfBase64, "base64").subarray(0, 5).toString("ascii")).toBe("%PDF-");
+  });
+});
+
 describe("system.health", () => {
   it("returns ok true with valid input", async () => {
     const ctx = createContext(null);

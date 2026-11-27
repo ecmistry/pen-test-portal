@@ -93,8 +93,22 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
   doc.setTextColor(0, 0, 0);
   y = 52;
 
-  // 1. Overview
-  addHeading("1. What Ghoststrike Does", 13);
+  // 1. Why useful
+  addHeading("1. Why Ghoststrike Is Useful", 13);
+  addBullets([
+    "Continuous automated testing between expensive manual pentests — light or full scans on demand or on a schedule",
+    "DAST on live apps plus optional SAST/SCA/secrets on Git repos, with authenticated and multi-role coverage",
+    "Findings mapped to OWASP, CWE, CVSS, ATT&CK, and ISO 27001 — exportable as PDF, Markdown, JSON, or SARIF",
+    "Daily 03:00 UTC intel refresh (Nuclei, PayloadsAllTheThings, CISA KEV, EPSS, Trivy DB) so scans stay current",
+    "CI gates, waivers, webhooks, and ticketing so issues reach the backlog instead of sitting in a report",
+    "Detects exposed AWS keys and can tag known honeytoken prefixes — without calling AWS APIs to validate keys",
+  ]);
+  addParagraph(
+    "For a short stakeholder brief focused only on value, download “Why Ghoststrike is useful” from the Docs page."
+  );
+
+  // 2. Overview
+  addHeading("2. What Ghoststrike Does", 13);
   addParagraph(
     "Ghoststrike is an automated penetration testing portal that combines Dynamic Application Security Testing (DAST) and Static Application Security Testing (SAST) to assess web applications. It scans live applications over HTTP and analyses source code in Git repositories, linking findings to URLs, components, and exact source file locations."
   );
@@ -102,8 +116,8 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
     "Reports are aligned with industry standards including OWASP Top 10:2021, PTES, NIST SP 800-115, CWE Top 25, CVSSv3.1, MITRE ATT&CK, OWASP API Security Top 10:2023, and ISO/IEC 27001."
   );
 
-  // 2. How it works
-  addHeading("2. How It Works", 13);
+  // 3. How it works
+  addHeading("3. How It Works", 13);
   addSubheading("Targets");
   addParagraph(
     "A target is an application to scan. Each target has a name, a live URL (for DAST), an optional Git repository URL (for SAST via Semgrep), plus description, tags, and scan frequency for scheduling."
@@ -122,7 +136,7 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
   );
 
   // 3. DAST
-  addHeading("3. DAST — Dynamic Application Security Testing", 13);
+  addHeading("4. DAST — Dynamic Application Security Testing", 13);
   addParagraph(
     "DAST tests the running application by sending HTTP requests and analysing responses. Ghoststrike includes 24+ built-in DAST modules that run without external tool dependencies."
   );
@@ -172,7 +186,7 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
   );
 
   // 4. SAST
-  addHeading("4. SAST — Static Application Security Testing", 13);
+  addHeading("5. SAST — Static Application Security Testing", 13);
   addParagraph(
     "When a target has a Repository URL, full-mode scans clone the Git repo (shallow) and run Semgrep with --config auto (thousands of community security rules). Findings include source file path, line number, code snippet with markers, CWE/OWASP mapping, confidence, and rule references."
   );
@@ -187,7 +201,7 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
   ]);
 
   // 5. Authenticated scanning
-  addHeading("5. Authenticated Scanning", 13);
+  addHeading("6. Authenticated Scanning", 13);
   addParagraph(
     "Ghoststrike supports Bearer tokens, HTTP Basic credentials, and form/JSON login with session cookie capture. Authenticated scans cover post-login pages, protected APIs, and admin panels, and can tag findings as pre-auth or post-auth."
   );
@@ -199,7 +213,7 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
   ]);
 
   // 6. SCA & payload sources
-  addHeading("6. SCA & Capability Sources", 13);
+  addHeading("7. SCA & Capability Sources", 13);
   addParagraph(
     "Software Composition Analysis runs via OSV-Scanner or Trivy when dependency manifests are available (e.g. package.json, requirements.txt, pom.xml), identifying known CVEs in third-party libraries."
   );
@@ -223,7 +237,7 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
   );
 
   // 7. Reporting
-  addHeading("7. Reporting & Finding Enrichment", 13);
+  addHeading("8. Reporting & Finding Enrichment", 13);
   addParagraph(
     "Every scan produces a professional report exportable as PDF (stakeholder A4), Markdown (in-app / docs workflows), and JSON (CI/CD and integrations). Structure covers document control, scope, executive summary, test coverage, findings summary, detailed findings, recommendations, and standards compliance."
   );
@@ -237,7 +251,7 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
   ]);
 
   // 8. Quality & limitations
-  addHeading("8. False Positive Reduction", 13);
+  addHeading("9. False Positive Reduction", 13);
   addBullets([
     "SPA detection — suppresses false 'file found' alerts from SPA fallbacks",
     "Content validation — verifies expected file content, not generic HTML shells",
@@ -246,7 +260,7 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
     "Semgrep confidence filtering — includes WARNING/ERROR severity only",
   ]);
 
-  addHeading("9. Getting Started", 13);
+  addHeading("10. Getting Started", 13);
   addBullets([
     "Create a target with the application URL (and optional Git repo URL for SAST)",
     "Run a Light or Full scan",
@@ -258,7 +272,7 @@ export function generateOverviewPdf(generatedAt: Date = new Date()): Buffer {
     "To enable SAST: edit the target, set the Git repository URL, then run a Full scan. SAST findings appear with file paths, line numbers, and snippets in the UI and reports."
   );
 
-  addHeading("10. Limitations", 13);
+  addHeading("11. Limitations", 13);
   addBullets([
     "Automated only — does not replace manual penetration testing or expert judgement",
     "DAST is external-perspective; internal network vulns are out of scope",
