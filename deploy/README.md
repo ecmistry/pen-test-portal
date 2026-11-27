@@ -96,6 +96,21 @@ For the most comprehensive full-mode scans, install these free tools so the port
 
 The portal detects each tool at scan time; if missing, that phase is skipped and (where applicable) an informational finding is recorded.
 
+Also install **Semgrep**, **OSV-Scanner** and/or **Trivy**, and **Gitleaks** for SAST/SCA/secrets coverage on repo-backed targets.
+
+## Daily security intelligence cron (03:00 UTC)
+
+The app process runs an in-process cron (`0 0 3 * * *` UTC) that refreshes:
+
+- PayloadsAllTheThings (SQLi/XSS)
+- Nuclei templates
+- CISA KEV catalog
+- FIRST.org EPSS scores
+- Trivy vulnerability DB (if installed)
+- NVD warm-cache for recent KEV CVEs
+
+Configure via `CAPABILITY_AUTO_UPDATE`, `CAPABILITY_UPDATE_CRON`, optional `NVD_API_KEY`. Manual refresh: **Admin → Update pen test capabilities**. See `docs/PENTEST_METHODOLOGY.md` §2.
+
 ## Login
 
 With `DEV_BYPASS_AUTH=true` and `VITE_DEV_LOGIN=true` in `.env`, use **Dev Login** on the portal to sign in without OAuth. For production OAuth, set `VITE_APP_ID`, `OAUTH_SERVER_URL`, and `VITE_OAUTH_PORTAL_URL` and switch off the dev bypass.

@@ -55,6 +55,18 @@ describe("system.getMethodology", () => {
   });
 });
 
+describe("system.getOverviewPdf", () => {
+  it("returns pdfBase64 and title without auth", async () => {
+    const ctx = createContext(null);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.system.getOverviewPdf();
+    expect(result.title).toBe("Ghoststrike Portal Overview");
+    expect(result.filename).toBe("ghoststrike-portal-overview.pdf");
+    expect(result.pdfBase64).toBeDefined();
+    expect(Buffer.from(result.pdfBase64, "base64").subarray(0, 5).toString("ascii")).toBe("%PDF-");
+  });
+});
+
 describe("system.health", () => {
   it("returns ok true with valid input", async () => {
     const ctx = createContext(null);

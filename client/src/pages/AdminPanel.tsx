@@ -56,7 +56,11 @@ export default function AdminPanel() {
       const parts = [];
       if (data.payloads?.sqli) parts.push(`${data.payloads.sqli} SQLi payloads`);
       if (data.payloads?.xss) parts.push(`${data.payloads.xss} XSS payloads`);
-      if (data.nuclei?.updated) parts.push("Nuclei templates updated");
+      if (data.nuclei?.updated) parts.push("Nuclei templates");
+      if (data.kev?.count) parts.push(`${data.kev.count} CISA KEV`);
+      if (data.epss?.count) parts.push(`${data.epss.count} EPSS`);
+      if (data.trivyDb?.updated) parts.push("Trivy DB");
+      if (data.nvdWarm?.fetched) parts.push(`NVD +${data.nvdWarm.fetched}`);
       toast.success(parts.length ? `Updated: ${parts.join(", ")}` : "Pen test capabilities updated");
     },
     onError: (e) => toast.error(e.message),
@@ -102,11 +106,33 @@ export default function AdminPanel() {
           </Button>
         </div>
 
-        {capabilitiesStatus?.lastUpdated && (
-          <div className="text-xs text-muted-foreground">
-            Last updated: {new Date(capabilitiesStatus.lastUpdated).toLocaleString()}
-            {capabilitiesStatus.payloads && (
-              <> · {capabilitiesStatus.payloads.sqli?.length ?? 0} SQLi / {capabilitiesStatus.payloads.xss?.length ?? 0} XSS payloads cached</>
+        {(capabilitiesStatus?.lastUpdated || capabilitiesStatus?.autoUpdate || capabilitiesStatus?.vulnIntel) && (
+          <div className="text-xs text-muted-foreground space-y-1">
+            {capabilitiesStatus?.lastUpdated && (
+              <div>
+                Last intel refresh: {new Date(capabilitiesStatus.lastUpdated).toLocaleString()}
+                {capabilitiesStatus.payloads && (
+                  <> · {capabilitiesStatus.payloads.sqli?.length ?? 0} SQLi / {capabilitiesStatus.payloads.xss?.length ?? 0} XSS payloads</>
+                )}
+              </div>
+            )}
+            {capabilitiesStatus?.vulnIntel && (
+              <div>
+                Threat intel cache: {capabilitiesStatus.vulnIntel.kevCount ?? 0} CISA KEV ·{" "}
+                {capabilitiesStatus.vulnIntel.epssCount ?? 0} EPSS ·{" "}
+                {capabilitiesStatus.vulnIntel.nvdCacheCount ?? 0} NVD cached
+              </div>
+            )}
+            {capabilitiesStatus?.autoUpdate && (
+              <div>
+                Daily auto-update:{" "}
+                {capabilitiesStatus.autoUpdate.enabled
+                  ? `enabled (cron ${capabilitiesStatus.autoUpdate.cron || "0 0 3 * * *"} ${capabilitiesStatus.autoUpdate.timezone || "UTC"})`
+                  : "disabled"}
+                {capabilitiesStatus.autoUpdate.lastRunAt && (
+                  <> · last run {new Date(capabilitiesStatus.autoUpdate.lastRunAt).toLocaleString()} ({capabilitiesStatus.autoUpdate.lastTrigger})</>
+                )}
+              </div>
             )}
           </div>
         )}

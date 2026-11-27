@@ -53,12 +53,20 @@ export interface WebhookConfig {
   type?: "slack" | "teams" | "generic";
 }
 
+/** Scanner credentials for private GitHub clones (SAST/SCA/secrets) */
+export interface RepoScanConfig {
+  /** Fine-grained or classic PAT with Contents: Read on target repos */
+  githubToken?: string;
+}
+
 export interface IntegrationsConfig {
   jira?: JiraConfig;
   github?: GitHubConfig;
   linear?: LinearConfig;
   /** Org/team notification endpoints */
   webhooks?: WebhookConfig[];
+  /** Used by the scanner to clone private GitHub repositories */
+  repoScan?: RepoScanConfig;
 }
 
 export interface TicketResult {

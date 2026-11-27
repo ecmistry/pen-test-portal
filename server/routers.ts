@@ -117,7 +117,7 @@ const loginCredentialsSchema = z.object({
   password: z.string().max(1024),
   usernameField: z.string().max(255).optional(),
   passwordField: z.string().max(255).optional(),
-  loginMethod: z.enum(["form", "json"]).optional(),
+  loginMethod: z.enum(["form", "json", "trpc"]).optional(),
 });
 
 const authConfigSchema = z.object({
@@ -158,6 +158,9 @@ const integrationsConfigSchema = z.object({
     type: z.enum(["slack", "teams", "generic"]).default("generic"),
     events: z.array(z.enum(["scan.completed", "scan.failed", "gate.failed", "finding.critical"])).optional(),
   })).max(10).optional(),
+  repoScan: z.object({
+    githubToken: z.string().max(512).optional(),
+  }).optional(),
 });
 
 async function buildCicdStatusPayload(
@@ -1012,6 +1015,14 @@ export const appRouter = router({
                 ),
               };
             }
+            if (merged.repoScan?.githubToken === "********" && prev.repoScan?.githubToken) {
+              merged = {
+                ...merged,
+                repoScan: { ...merged.repoScan, githubToken: prev.repoScan.githubToken },
+              };
+            } else if (!merged.repoScan && prev.repoScan) {
+              merged = { ...merged, repoScan: prev.repoScan };
+            }
           } catch { /* ignore */ }
         }
         const enc = encryptIntegrationsConfig(merged);
@@ -1574,11 +1585,20 @@ export const appRouter = router({
     }),
 
     updateScanCapabilities: adminProcedure.mutation(async () => {
-      return updatePenTestCapabilities();
+      const { runCapabilityUpdate } = await import("./capabilityUpdater");
+      return runCapabilityUpdate("manual");
     }),
 
     getScanCapabilitiesStatus: adminProcedure.query(async () => {
-      return getPenTestCache();
+      const { getCapabilityUpdaterStatus } = await import("./capabilityUpdater");
+      const { getVulnIntelSnapshot } = await import("./vulnIntel");
+      const cache = await getPenTestCache();
+      const vulnIntel = await getVulnIntelSnapshot();
+      return {
+        ...(cache ?? {}),
+        vulnIntel,
+        autoUpdate: getCapabilityUpdaterStatus(),
+      };
     }),
 
     scanQueueStats: adminProcedure.query(async () => {

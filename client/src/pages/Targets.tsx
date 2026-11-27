@@ -67,7 +67,7 @@ interface AuthScanForm {
   password: string;
   usernameField: string;
   passwordField: string;
-  loginMethod: "form" | "json";
+  loginMethod: "form" | "json" | "trpc";
   scanMode: "light" | "full";
   saveToTarget: boolean;
   verticalEscalation: boolean;
@@ -81,9 +81,9 @@ const defaultAuthForm: AuthScanForm = {
   loginUrl: "",
   username: "",
   password: "",
-  usernameField: "username",
+  usernameField: "email",
   passwordField: "password",
-  loginMethod: "json",
+  loginMethod: "trpc",
   scanMode: "full",
   saveToTarget: true,
   verticalEscalation: true,
@@ -161,11 +161,42 @@ export default function Targets() {
 
   function openAuthScan(t: any) {
     setAuthScanTarget(t);
+    const saved = (t.authConfig?.loginCredentials ?? null) as {
+      loginUrl?: string;
+      username?: string;
+      password?: string;
+      usernameField?: string;
+      passwordField?: string;
+      loginMethod?: "form" | "json" | "trpc";
+    } | null;
+    const tests = t.authConfig?.authTests ?? {};
+    const base = t.url.replace(/\/$/, "");
+    const defaultLoginUrl = `${base}/api/trpc/auth.login`;
     setAuthForm({
       ...defaultAuthForm,
-      loginUrl: t.url.replace(/\/$/, ""),
+      loginUrl: saved?.loginUrl || defaultLoginUrl,
+      username: saved?.username || "",
+      password: saved?.password || "",
+      usernameField: saved?.usernameField || "email",
+      passwordField: saved?.passwordField || "password",
+      loginMethod: saved?.loginMethod || "trpc",
+      verticalEscalation: tests.verticalEscalation ?? true,
+      horizontalEscalation: tests.horizontalEscalation ?? true,
+      sessionExpiry: tests.sessionExpiry ?? false,
+      tokenReuse: tests.tokenReuse ?? true,
+      profiles: Array.isArray(t.authConfig?.authProfiles)
+        ? t.authConfig.authProfiles.map((p: any) => ({
+            name: p.name || "",
+            type: p.type || "bearer",
+            token: p.token || "",
+            username: p.username || "",
+            password: p.password || "",
+            cookie: p.cookie || "",
+            privilegeRank: p.privilegeRank ?? 2,
+          }))
+        : [],
     });
-    setShowAdvanced(false);
+    setShowAdvanced(Boolean(saved?.usernameField && saved.usernameField !== "email"));
   }
 
   function handleSubmit() {
@@ -453,7 +484,7 @@ export default function Targets() {
                 onChange={(e) => setForm({ ...form, repoUrl: e.target.value })}
                 className="bg-input border-border text-foreground placeholder:text-muted-foreground"
               />
-              <p className="text-xs text-muted-foreground mt-1">Git HTTPS URL for Semgrep/SCA/secrets (set GITHUB_TOKEN on scanner for private repos).</p>
+              <p className="text-xs text-muted-foreground mt-1">Git HTTPS URL for Semgrep/SCA/secrets. For private repos, add a token under Integrations → GitHub clone token.</p>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div>
@@ -608,18 +639,21 @@ export default function Targets() {
               <div>
                 <Label className="text-foreground text-sm mb-1.5 block">Login URL *</Label>
                 <Input
-                  placeholder="https://example.com/login"
+                  placeholder="https://example.com/api/trpc/auth.login"
                   value={authForm.loginUrl}
                   onChange={(e) => setAuthForm({ ...authForm, loginUrl: e.target.value })}
                   className="bg-input border-border text-foreground placeholder:text-muted-foreground"
                 />
+                <p className="text-xs text-muted-foreground mt-1">
+                  Use the API login endpoint (not the SPA homepage). For Gravitee Info / Ghoststrike-style apps: <code className="text-[11px]">…/api/trpc/auth.login</code>
+                </p>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <Label className="text-foreground text-sm mb-1.5 block">Username *</Label>
+                  <Label className="text-foreground text-sm mb-1.5 block">Email / Username *</Label>
                   <Input
-                    placeholder="admin"
+                    placeholder="pen-test-user@example.com"
                     value={authForm.username}
                     onChange={(e) => setAuthForm({ ...authForm, username: e.target.value })}
                     className="bg-input border-border text-foreground placeholder:text-muted-foreground"
@@ -654,12 +688,22 @@ export default function Targets() {
                 </div>
                 <div>
                   <Label className="text-foreground text-sm mb-1.5 block">Login Method</Label>
-                  <Select value={authForm.loginMethod} onValueChange={(v: any) => setAuthForm({ ...authForm, loginMethod: v })}>
+                  <Select
+                    value={authForm.loginMethod}
+                    onValueChange={(v: "form" | "json" | "trpc") =>
+                      setAuthForm({
+                        ...authForm,
+                        loginMethod: v,
+                        usernameField: v === "trpc" ? (authForm.usernameField || "email") : authForm.usernameField,
+                      })
+                    }
+                  >
                     <SelectTrigger className="bg-input border-border text-foreground">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent className="bg-card border-border text-foreground">
-                      <SelectItem value="json">JSON (API)</SelectItem>
+                      <SelectItem value="trpc">tRPC (JSON envelope)</SelectItem>
+                      <SelectItem value="json">JSON (flat API)</SelectItem>
                       <SelectItem value="form">Form POST</SelectItem>
                     </SelectContent>
                   </Select>
@@ -676,7 +720,7 @@ export default function Targets() {
                   <div>
                     <Label className="text-muted-foreground text-xs mb-1 block">Username Field</Label>
                     <Input
-                      placeholder="username"
+                      placeholder="email"
                       value={authForm.usernameField}
                       onChange={(e) => setAuthForm({ ...authForm, usernameField: e.target.value })}
                       className="bg-input border-border text-foreground placeholder:text-muted-foreground text-sm h-8"

@@ -145,6 +145,9 @@ async function startServer() {
     import("../artifactRetention")
       .then(({ startArtifactRetentionScheduler }) => startArtifactRetentionScheduler())
       .catch((err) => console.warn("[Startup] artifact retention failed to start:", err?.message || err));
+    import("../capabilityUpdater")
+      .then(({ startCapabilityUpdater }) => startCapabilityUpdater())
+      .catch((err) => console.warn("[Startup] capability updater failed to start:", err?.message || err));
   });
 }
 

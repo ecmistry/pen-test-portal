@@ -42,5 +42,8 @@ export function redactIntegrationsConfig(config: IntegrationsConfig): Integratio
   if (clone.linear) {
     clone.linear = { ...clone.linear, apiKey: clone.linear.apiKey ? "********" : "" };
   }
+  if (clone.repoScan?.githubToken) {
+    clone.repoScan = { ...clone.repoScan, githubToken: "********" };
+  }
   return clone;
 }

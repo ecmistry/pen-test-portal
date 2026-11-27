@@ -31,6 +31,10 @@ export type RepoCloneOptions = {
   ref?: string | null;
   /** Relative subpath inside repo to focus scanners on */
   subpath?: string | null;
+  /** Explicit token; otherwise env / Integrations UI token is used */
+  githubToken?: string | null;
+  userId?: number | null;
+  orgId?: number | null;
 };
 
 export type RepoCloneResult = {
@@ -55,6 +59,31 @@ export function withGithubToken(repoUrl: string, token?: string): string {
   }
 }
 
+/**
+ * Resolve clone token: explicit arg → GITHUB_TOKEN env → Integrations → UI (repoScan.githubToken).
+ */
+export async function resolveGithubCloneToken(opts?: {
+  token?: string | null;
+  userId?: number | null;
+  orgId?: number | null;
+}): Promise<string> {
+  const explicit = (opts?.token || "").trim();
+  if (explicit) return explicit;
+  const env = (process.env.GITHUB_TOKEN || "").trim();
+  if (env) return env;
+  if (!opts?.userId && !opts?.orgId) return "";
+  try {
+    const { getIntegrationForUser } = await import("./db");
+    const { decryptIntegrationsConfig } = await import("./integrationsCrypto");
+    const row = await getIntegrationForUser(opts.userId || 0, opts.orgId);
+    if (!row?.configEnc) return "";
+    const cfg = decryptIntegrationsConfig(row.configEnc);
+    return (cfg.repoScan?.githubToken || "").trim();
+  } catch {
+    return "";
+  }
+}
+
 export function defaultCloneDir(scanId: number): string {
   return `/tmp/repo-scan-${scanId}`;
 }
@@ -65,7 +94,12 @@ export async function cloneGitRepo(opts: RepoCloneOptions): Promise<RepoCloneRes
   if (existsSync(cloneDir)) rmSync(cloneDir, { recursive: true, force: true });
 
   const safeRepo = await assertSafeOutboundUrl(opts.repoUrl, { protocols: ["https:"] });
-  const authed = withGithubToken(safeRepo.href);
+  const token = await resolveGithubCloneToken({
+    token: opts.githubToken,
+    userId: opts.userId,
+    orgId: opts.orgId,
+  });
+  const authed = withGithubToken(safeRepo.href, token || undefined);
   // Re-parse after token injection — still https only
   const authedUrl = new URL(authed);
   if (authedUrl.protocol !== "https:") throw new Error("Only https clone URLs are allowed");

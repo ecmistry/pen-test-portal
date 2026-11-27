@@ -1,10 +1,73 @@
 import { useAuth } from "@/_core/hooks/useAuth";
 import { Button } from "@/components/ui/button";
 import { trpc } from "@/lib/trpc";
-import { FileText, Loader2 } from "lucide-react";
+import { Download, FileText, Loader2 } from "lucide-react";
 import { Link } from "wouter";
 import { Streamdown } from "streamdown";
 import AppLayout from "@/components/AppLayout";
+
+function downloadPdfFromBase64(pdfBase64: string, filename: string) {
+  const binary = atob(pdfBase64);
+  const arr = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) arr[i] = binary.charCodeAt(i);
+  const blob = new Blob([arr], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function DownloadOverviewButton() {
+  const { refetch, isFetching } = trpc.system.getOverviewPdf.useQuery(undefined, {
+    enabled: false,
+  });
+
+  async function handleDownload() {
+    const result = await refetch();
+    if (result.data?.pdfBase64) {
+      downloadPdfFromBase64(
+        result.data.pdfBase64,
+        result.data.filename || "ghoststrike-portal-overview.pdf"
+      );
+    }
+  }
+
+  return (
+    <Button
+      variant="outline"
+      size="sm"
+      onClick={handleDownload}
+      disabled={isFetching}
+      className="gap-2"
+    >
+      {isFetching ? (
+        <Loader2 className="w-4 h-4 animate-spin" />
+      ) : (
+        <Download className="w-4 h-4" />
+      )}
+      Download portal overview PDF
+    </Button>
+  );
+}
+
+function DocsHeader({ showNavHome }: { showNavHome?: boolean }) {
+  return (
+    <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <div>
+        <h1 className="text-2xl font-bold text-foreground">
+          {showNavHome ? "Scan methodology & documentation" : "Documentation"}
+        </h1>
+        <p className="text-muted-foreground mt-1">
+          How Ghoststrike tests your applications, which tools and sources it uses, and which standards we follow.
+          Download the portal overview PDF for a detailed stakeholder-ready summary.
+        </p>
+      </div>
+      <DownloadOverviewButton />
+    </div>
+  );
+}
 
 function MethodologyContent() {
   const { data: markdown, isLoading, error } = trpc.system.getMethodology.useQuery();
@@ -47,8 +110,9 @@ export default function Methodology() {
 
   if (isAuthenticated) {
     return (
-      <AppLayout title="Scan methodology">
+      <AppLayout title="Methodology & docs">
         <div className="p-6 max-w-4xl mx-auto">
+          <DocsHeader />
           <MethodologyContent />
         </div>
       </AppLayout>
@@ -74,12 +138,7 @@ export default function Methodology() {
         </div>
       </nav>
       <main className="container max-w-4xl mx-auto py-8 px-4">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold text-foreground">Scan methodology & documentation</h1>
-          <p className="text-muted-foreground mt-1">
-            How Ghoststrike tests your applications and which standards we follow.
-          </p>
-        </div>
+        <DocsHeader showNavHome />
         <MethodologyContent />
       </main>
     </div>

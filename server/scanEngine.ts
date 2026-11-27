@@ -47,6 +47,7 @@ const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 import { InsertScanFinding } from "../drizzle/schema";
 import { getPenTestCache } from "./penTestUpdater";
 import { enrichFinding } from "./findingEnrichment";
+import { buildThreatIntelForTexts } from "./vulnIntel";
 import {
   type FindingConfidence,
   type ProbeTarget,
@@ -226,7 +227,63 @@ export interface LoginCredentials {
   password: string;
   usernameField?: string;
   passwordField?: string;
-  loginMethod?: "form" | "json";
+  /** form = urlencoded, json = flat JSON, trpc = { json: { fields } } envelope */
+  loginMethod?: "form" | "json" | "trpc";
+}
+
+/** Resolve effective login method (auto-detect tRPC from URL when method is json). */
+export function resolveLoginMethod(creds: LoginCredentials): "form" | "json" | "trpc" {
+  const method = creds.loginMethod ?? "form";
+  if (method === "trpc") return "trpc";
+  if (method === "json" && /\/api\/trpc\//i.test(creds.loginUrl)) return "trpc";
+  return method;
+}
+
+/** Build login request body + content-type for the chosen method. */
+export function buildLoginRequest(creds: LoginCredentials): { body: string; contentType: string; method: "form" | "json" | "trpc" } {
+  const method = resolveLoginMethod(creds);
+  const userField =
+    creds.usernameField ??
+    (method === "trpc" ? "email" : "username");
+  const passField = creds.passwordField ?? "password";
+
+  if (method === "trpc") {
+    return {
+      method,
+      contentType: "application/json",
+      body: JSON.stringify({ json: { [userField]: creds.username, [passField]: creds.password } }),
+    };
+  }
+  if (method === "json") {
+    return {
+      method,
+      contentType: "application/json",
+      body: JSON.stringify({ [userField]: creds.username, [passField]: creds.password }),
+    };
+  }
+  return {
+    method,
+    contentType: "application/x-www-form-urlencoded",
+    body: `${encodeURIComponent(userField)}=${encodeURIComponent(creds.username)}&${encodeURIComponent(passField)}=${encodeURIComponent(creds.password)}`,
+  };
+}
+
+/**
+ * If loginUrl is only the site origin (SPA shell), prefer a discovered API login path.
+ * Callers may pass an explicit API login URL to skip this.
+ */
+export function resolveLoginUrl(loginUrl: string, targetUrl?: string): string {
+  try {
+    const u = new URL(loginUrl);
+    const path = u.pathname.replace(/\/$/, "") || "/";
+    if (path === "/" || path === "/login" || path === "/signin") {
+      const base = targetUrl ? new URL(targetUrl).origin : u.origin;
+      return `${base}/api/trpc/auth.login`;
+    }
+  } catch {
+    /* keep original */
+  }
+  return loginUrl;
 }
 
 export interface AuthScanConfig {
@@ -412,32 +469,31 @@ export function mergeCookies(existing: string, incoming: string): string {
 }
 
 /**
- * Perform login to a target portal and return session cookies.
- * Supports form-based (application/x-www-form-urlencoded) and JSON login.
+ * Perform login to a target portal and return session cookies / bearer marker.
+ * Supports form, flat JSON, and tRPC `{ json: { … } }` envelopes.
  * Follows up to 5 redirects to capture all Set-Cookie headers.
  */
 export async function performLogin(
   scanId: number,
   creds: LoginCredentials,
+  targetUrl?: string,
 ): Promise<string> {
-  const method = creds.loginMethod ?? "form";
-  const userField = creds.usernameField ?? "username";
-  const passField = creds.passwordField ?? "password";
+  const loginUrl = resolveLoginUrl(creds.loginUrl, targetUrl);
+  const { body, contentType, method } = buildLoginRequest({ ...creds, loginUrl });
 
-  await log(scanId, "info", `Attempting authenticated login to ${creds.loginUrl} (method: ${method})`, "login");
-
-  let body: string;
-  let contentType: string;
-  if (method === "json") {
-    body = JSON.stringify({ [userField]: creds.username, [passField]: creds.password });
-    contentType = "application/json";
-  } else {
-    body = `${encodeURIComponent(userField)}=${encodeURIComponent(creds.username)}&${encodeURIComponent(passField)}=${encodeURIComponent(creds.password)}`;
-    contentType = "application/x-www-form-urlencoded";
-  }
+  await log(
+    scanId,
+    "info",
+    `Attempting authenticated login to ${loginUrl} (method: ${method}` +
+      (loginUrl !== creds.loginUrl ? `; rewritten from ${creds.loginUrl}` : "") +
+      `)`,
+    "login",
+  );
 
   let cookies = "";
-  let currentUrl = creds.loginUrl;
+  let currentUrl = loginUrl;
+  let lastStatus = 0;
+  let lastBodyPreview = "";
 
   // Follow redirects (up to 5) to collect all cookies
   for (let i = 0; i < 6; i++) {
@@ -448,7 +504,8 @@ export async function performLogin(
       ? { "Content-Type": contentType, ...(cookies ? { Cookie: cookies } : {}) }
       : { ...(cookies ? { Cookie: cookies } : {}) };
 
-    const resp = await httpGet(currentUrl, "/", {
+    // Pass absolute URL as path so we POST to the exact login endpoint (not origin + "/")
+    const resp = await httpGet(currentUrl, currentUrl, {
       method: reqMethod,
       body: reqBody,
       headers,
@@ -457,14 +514,26 @@ export async function performLogin(
       throw new Error(`Login request failed: ${err.message}`);
     });
 
+    lastStatus = resp.status;
+    lastBodyPreview = (resp.body || "").replace(/\s+/g, " ").slice(0, 180);
+
     const newCookies = extractCookies(resp.headers);
     if (newCookies) cookies = mergeCookies(cookies, newCookies);
 
-    // Check for bearer token in JSON response
-    if (method === "json" && isFirst) {
+    // Check for bearer token in JSON response (flat or tRPC result envelope)
+    if ((method === "json" || method === "trpc") && isFirst) {
       try {
         const jsonResp = JSON.parse(resp.body);
-        const token = jsonResp.token ?? jsonResp.access_token ?? jsonResp.accessToken ?? jsonResp.jwt;
+        const nested = jsonResp?.result?.data?.json ?? jsonResp?.result?.data ?? jsonResp;
+        const token =
+          nested?.token ??
+          nested?.access_token ??
+          nested?.accessToken ??
+          nested?.jwt ??
+          jsonResp?.token ??
+          jsonResp?.access_token ??
+          jsonResp?.accessToken ??
+          jsonResp?.jwt;
         if (token && typeof token === "string") {
           await log(scanId, "success", `Login returned bearer token — will use for authenticated scanning`, "login");
           return `__bearer__${token}`;
@@ -491,6 +560,11 @@ export async function performLogin(
       return "";
     }
 
+    if (resp.status === 429) {
+      await log(scanId, "error", `Login rate-limited (HTTP 429). Wait before re-scanning.`, "login");
+      return "";
+    }
+
     break;
   }
 
@@ -499,7 +573,14 @@ export async function performLogin(
     return cookies;
   }
 
-  await log(scanId, "warn", "Login completed but no session cookies captured. Authenticated scanning may be limited.", "login");
+  await log(
+    scanId,
+    "warn",
+    `Login completed but no session cookies captured (HTTP ${lastStatus}` +
+      (lastBodyPreview ? `: ${lastBodyPreview}` : "") +
+      "). Authenticated scanning may be limited. For tRPC apps use Login URL …/api/trpc/auth.login, method tRPC, username field email.",
+    "login",
+  );
   return "";
 }
 
@@ -3708,12 +3789,15 @@ export async function testSAST(
     }
 
     if (!cloneDir || !scanRoot) {
+      const owner = await getScanById(scanId).catch(() => null);
       const cloned = await cloneGitRepo({
         scanId,
         repoUrl,
         branch: opts?.branch,
         ref: opts?.ref,
         subpath: opts?.subpath,
+        userId: owner?.userId,
+        orgId: owner?.orgId,
       });
       cloneDir = cloned.cloneDir;
       scanRoot = cloned.scanRoot;
@@ -3851,8 +3935,8 @@ export async function testSAST(
         category: "SAST",
         severity: "info",
         title: "SAST scan failed — repository not accessible",
-        description: `Could not clone repository: ${repoUrl}. Ensure the URL is correct and the repository is accessible (set GITHUB_TOKEN for private repos).`,
-        recommendation: "Verify the repository URL. For private repositories, set GITHUB_TOKEN in the scanner environment.",
+        description: `Could not clone repository: ${repoUrl}. Ensure the URL is correct and the repository is accessible (add a GitHub clone token under Integrations, or set GITHUB_TOKEN).`,
+        recommendation: "Verify the repository URL. For private repositories, add a GitHub PAT under Integrations → GitHub clone token (Contents: Read), or set GITHUB_TOKEN on the scanner host.",
         affectedUrl: repoUrl,
         affectedComponent: "Repository Access",
       });
@@ -4648,7 +4732,7 @@ export async function runScan(
     scanAuthMeta.loginUrl = effectiveLogin.loginUrl;
     scanAuthMeta.authRole = effectiveLogin.username;
     try {
-      const loginResult = await performLogin(scanId, effectiveLogin);
+      const loginResult = await performLogin(scanId, effectiveLogin, targetUrl);
       if (loginResult.startsWith("__bearer__")) {
         const token = loginResult.slice("__bearer__".length);
         sessionCookies = undefined;
@@ -4744,6 +4828,7 @@ export async function runScan(
   // Shared repo clone for SAST / SCA / secrets when repoUrl is set
   let sharedClone: { cloneDir: string; scanRoot: string } | null = null;
   const needsRepo = toolsToRun.some((t) => ["sast", "sca", "secrets"].includes(t.toLowerCase())) && !!repoUrl;
+  const scanOwner = await getScanById(scanId).catch(() => null);
   if (needsRepo && repoUrl) {
     try {
       sharedClone = await cloneGitRepo({
@@ -4752,10 +4837,17 @@ export async function runScan(
         branch: repoOpts?.branch,
         ref: repoOpts?.ref,
         subpath: repoOpts?.subpath,
+        userId: scanOwner?.userId,
+        orgId: scanOwner?.orgId,
       });
       await log(scanId, "info", `Shared repo clone ready (${sharedClone.scanRoot})`, "init");
     } catch (err) {
-      await log(scanId, "warn", `Repo clone failed: ${(err as Error).message}`, "init");
+      await log(
+        scanId,
+        "warn",
+        `Repo clone failed: ${(err as Error).message}. For private repos, set a GitHub token under Integrations → GitHub clone token (or GITHUB_TOKEN in .env).`,
+        "init",
+      );
     }
   }
 
@@ -5400,9 +5492,12 @@ export async function runScan(
       scanAuthMeta.totalEndpointsTested = allFindings.length;
     }
 
-    // Store findings (with CVSS, business impact, remediation, ATT&CK, ISO enrichment)
+    // Store findings (with CVSS, business impact, remediation, ATT&CK, ISO + CVE threat intel)
     if (allFindings.length > 0) {
-      const dbFindings: InsertScanFinding[] = allFindings.map((f) => {
+      const fetchMissingNvd =
+        process.env.NVD_ENRICH_ON_SCAN === "true" || Boolean(process.env.NVD_API_KEY?.trim());
+      const dbFindings: InsertScanFinding[] = [];
+      for (const f of allFindings) {
         const enriched = enrichFinding(f.category, f.severity, f.cweId);
 
         let evidence = f.evidence ?? "";
@@ -5415,26 +5510,75 @@ export async function runScan(
           evidence = `[Auth Context] ${authMetaParts.join(" | ")}\n${evidence}`;
         }
 
-        const poc = f.poc ?? null;
+        let description = f.description ?? "";
+        let recommendation = f.recommendation ?? "";
+        let confidence = f.confidence ?? null;
+        let cvssVector = enriched.cvssVector;
+        let cvssScore = enriched.cvssScore;
+        let remediationPriority = enriched.remediationPriority;
+        let businessImpact = enriched.businessImpact;
 
+        try {
+          const intel = await buildThreatIntelForTexts(
+            [f.title, f.description, f.evidence, f.templateId, f.affectedComponent],
+            { fetchMissingNvd }
+          );
+          if (intel) {
+            evidence = evidence ? `${evidence}\n${intel.evidenceExtra}` : intel.evidenceExtra;
+            if (intel.descriptionExtra) {
+              description = description
+                ? `${description}\n\n${intel.descriptionExtra}`
+                : intel.descriptionExtra;
+            }
+            if (intel.recommendationExtra) {
+              recommendation = recommendation
+                ? `${intel.recommendationExtra}\n${recommendation}`
+                : intel.recommendationExtra;
+            }
+            if (intel.preferCvss) {
+              cvssScore = intel.preferCvss.score;
+              cvssVector = intel.preferCvss.vector;
+            }
+            if (intel.bumpPriorityToP1) {
+              remediationPriority = "P1";
+              if (businessImpact) {
+                businessImpact = {
+                  ...businessImpact,
+                  rationale: `CISA KEV known-exploited vulnerability. ${businessImpact.rationale}`,
+                  financial: businessImpact.financial === "None" ? "High" : businessImpact.financial,
+                  legal: businessImpact.legal === "None" ? "High" : businessImpact.legal,
+                };
+              }
+            }
+            if (intel.confidenceHint) {
+              const rank = { heuristic: 1, likely: 2, confirmed: 3 } as const;
+              const current = confidence && confidence in rank ? rank[confidence as keyof typeof rank] : 0;
+              if (rank[intel.confidenceHint] >= current) confidence = intel.confidenceHint;
+            }
+          }
+        } catch (err) {
+          console.warn("[scan] threat intel enrichment failed:", (err as Error).message);
+        }
+
+        const poc = f.poc ?? null;
         const waived = isWaivedFinding(f, activeWaivers);
-        return {
+        dbFindings.push({
           scanId,
           category: f.category,
           severity: f.severity,
           title: f.title,
-          description: f.description,
+          description: description || null,
           evidence: evidence || null,
-          recommendation: f.recommendation,
+          recommendation: recommendation || null,
           cweId: f.cweId,
           owaspCategory: f.owaspCategory,
-          confidence: f.confidence ?? null,
+          confidence,
           templateId: f.templateId ?? null,
-          cvssVector: enriched.cvssVector,
-          cvssScore: enriched.cvssScore != null ? String(enriched.cvssScore) : null,
+          cvssVector,
+          cvssScore: cvssScore != null ? String(cvssScore) : null,
           remediationComplexity: enriched.remediationComplexity,
-          remediationPriority: enriched.remediationPriority,
-          businessImpact: enriched.businessImpact,
+          remediationPriority,
+          businessImpact,
           attackTechniques: enriched.attackTechniques,
           iso27001Controls: enriched.iso27001Controls,
           poc,
@@ -5445,8 +5589,8 @@ export async function runScan(
           sourceSnippet: f.sourceSnippet ?? null,
           authContext: f.authContext ?? null,
           status: waived ? "false_positive" : "open",
-        };
-      });
+        });
+      }
       await createFindings(dbFindings);
     }
 

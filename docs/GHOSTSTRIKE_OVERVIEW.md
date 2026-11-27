@@ -206,13 +206,21 @@ Ghoststrike includes several mechanisms to reduce noise:
 
 ---
 
-## Payload Updates
+## Security Intelligence Updates
 
-Scan payloads can be kept current:
+Ghoststrike runs a **daily cron at 03:00 UTC** (`0 0 3 * * *`) to refresh security intelligence so scans use current vulnerability data. Admins can also trigger an immediate refresh from **Admin → Update pen test capabilities**. Disable with `CAPABILITY_AUTO_UPDATE=false`.
 
-- **PayloadsAllTheThings** — SQL injection and XSS payload lists from the community repository, updated via Admin panel
-- **Nuclei Templates** — community-maintained CVE/misconfig templates, updated via `nuclei -update-templates`
-- **Semgrep Rules** — automatically fetched from the Semgrep registry with `--config auto` on each scan
+| Source | Purpose | Refresh |
+|--------|---------|---------|
+| **PayloadsAllTheThings** | SQLi / XSS DAST payloads | Daily 03:00 UTC + Admin |
+| **Nuclei templates** | CVE / misconfig / exposure / takeover DAST | Daily `nuclei -update-templates` |
+| **CISA KEV** | Known-exploited CVE prioritization (P1) | Daily catalog sync |
+| **FIRST.org EPSS** | Exploit probability scoring | Daily score download |
+| **NVD** | Official CVE description + CVSS (KEV warm-cache) | Daily warm + optional on-scan |
+| **Trivy DB** | Dependency CVE database | Daily (if Trivy installed) |
+| **OSV** | Dependency advisories (GHSA/CVE) | Live at SCA scan time |
+| **Semgrep registry** | SAST rules | Per SAST scan |
+| **Exploit-DB links** | Analyst PoC search URLs on CVE findings | Attached at finding persist time |
 
 ---
 

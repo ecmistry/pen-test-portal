@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { analyzeAttackScenarios, computeTrend, calculateScore, isSpaFallback, hasFileSpecificContent, buildAuthHeader, profilePrivilegeRank, parseOsvOutput, parseTrivyOutput, scaVulnsToFindings, performLogin, extractCookies, mergeCookies, isNiktoMetadataLine, isNiktoLegacyCGI, getToolAuthCapabilities, testURLNormalisationBypass, type AttackScenario, type TrendSummary, type AuthProfile, type ScaDependencyVuln, type LoginCredentials, type ScanAuthMeta } from "./scanEngine";
+import { analyzeAttackScenarios, computeTrend, calculateScore, isSpaFallback, hasFileSpecificContent, buildAuthHeader, profilePrivilegeRank, parseOsvOutput, parseTrivyOutput, scaVulnsToFindings, performLogin, extractCookies, mergeCookies, isNiktoMetadataLine, isNiktoLegacyCGI, getToolAuthCapabilities, testURLNormalisationBypass, buildLoginRequest, resolveLoginMethod, resolveLoginUrl, type AttackScenario, type TrendSummary, type AuthProfile, type ScaDependencyVuln, type LoginCredentials, type ScanAuthMeta } from "./scanEngine";
 
 describe("analyzeAttackScenarios", () => {
   it("returns empty array when no findings", () => {
@@ -772,6 +772,42 @@ describe("LoginCredentials type", () => {
     expect(creds.usernameField).toBeUndefined();
     expect(creds.passwordField).toBeUndefined();
     expect(creds.loginMethod).toBeUndefined();
+  });
+});
+
+describe("resolveLoginMethod / buildLoginRequest / resolveLoginUrl", () => {
+  it("auto-detects trpc from /api/trpc/ login URL when method is json", () => {
+    expect(
+      resolveLoginMethod({
+        loginUrl: "https://example.com/api/trpc/auth.login",
+        username: "a@b.c",
+        password: "x",
+        loginMethod: "json",
+      }),
+    ).toBe("trpc");
+  });
+
+  it("builds tRPC envelope with email default field", () => {
+    const req = buildLoginRequest({
+      loginUrl: "https://example.com/api/trpc/auth.login",
+      username: "pen@example.com",
+      password: "secret",
+      loginMethod: "trpc",
+    });
+    expect(req.method).toBe("trpc");
+    expect(req.contentType).toBe("application/json");
+    expect(JSON.parse(req.body)).toEqual({
+      json: { email: "pen@example.com", password: "secret" },
+    });
+  });
+
+  it("rewrites SPA origin login URL to tRPC auth.login", () => {
+    expect(resolveLoginUrl("https://gravitee.info", "https://gravitee.info/")).toBe(
+      "https://gravitee.info/api/trpc/auth.login",
+    );
+    expect(resolveLoginUrl("https://gravitee.info/api/trpc/auth.login")).toBe(
+      "https://gravitee.info/api/trpc/auth.login",
+    );
   });
 });
 

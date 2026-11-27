@@ -28,7 +28,7 @@ const navItems = [
   { path: "/integrations", label: "Integrations", icon: Plug },
   { path: "/policies", label: "Policies", icon: Settings },
   { path: "/compliance", label: "Compliance", icon: BarChart3 },
-  { path: "/methodology", label: "Methodology", icon: BookOpen },
+  { path: "/methodology", label: "Docs", icon: BookOpen },
 ];
 
 const adminItems = [

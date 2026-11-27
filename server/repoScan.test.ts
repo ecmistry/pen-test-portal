@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   withGithubToken,
+  resolveGithubCloneToken,
   discoverLockfiles,
   buildSemgrepArgs,
   severityRank,
@@ -20,6 +21,20 @@ describe("withGithubToken", () => {
 
   it("leaves non-github URLs alone", () => {
     expect(withGithubToken("https://gitlab.com/a/b.git", "tok")).toBe("https://gitlab.com/a/b.git");
+  });
+});
+
+describe("resolveGithubCloneToken", () => {
+  it("prefers explicit token over env", async () => {
+    const prev = process.env.GITHUB_TOKEN;
+    process.env.GITHUB_TOKEN = "env-tok";
+    try {
+      expect(await resolveGithubCloneToken({ token: "ui-tok" })).toBe("ui-tok");
+      expect(await resolveGithubCloneToken({})).toBe("env-tok");
+    } finally {
+      if (prev === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = prev;
+    }
   });
 });
 

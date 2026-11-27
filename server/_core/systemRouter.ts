@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { z } from "zod";
+import { generateOverviewPdf } from "../overviewPdf";
 import { notifyOwner } from "./notification";
 import { adminProcedure, publicProcedure, router } from "./trpc";
 
@@ -15,6 +16,16 @@ export const systemRouter = router({
     } catch {
       return METHODOLOGY_FALLBACK;
     }
+  }),
+
+  /** Stakeholder PDF describing what Ghoststrike does and which scan sources it uses. */
+  getOverviewPdf: publicProcedure.query(() => {
+    const pdfBuffer = generateOverviewPdf(new Date());
+    return {
+      pdfBase64: pdfBuffer.toString("base64"),
+      title: "Ghoststrike Portal Overview",
+      filename: "ghoststrike-portal-overview.pdf",
+    };
   }),
 
   health: publicProcedure

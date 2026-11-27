@@ -40,6 +40,8 @@ export default function Integrations() {
 
   const [waiverTitle, setWaiverTitle] = useState("");
   const [waiverReason, setWaiverReason] = useState("");
+  const [cloneToken, setCloneToken] = useState("");
+  const [cloneTokenConfigured, setCloneTokenConfigured] = useState(false);
 
   useEffect(() => {
     const c = data?.config;
@@ -72,6 +74,12 @@ export default function Integrations() {
           secret: w.secret,
         }))
       );
+    }
+    if (c.repoScan?.githubToken) {
+      setCloneTokenConfigured(true);
+      setCloneToken("");
+    } else {
+      setCloneTokenConfigured(false);
     }
   }, [data]);
 
@@ -150,6 +158,10 @@ export default function Integrations() {
               >,
             }))
           : undefined,
+        repoScan:
+          cloneToken || cloneTokenConfigured
+            ? { githubToken: cloneToken || "********" }
+            : undefined,
       },
     });
   }
@@ -190,6 +202,30 @@ export default function Integrations() {
           </div>
         ) : (
           <div className="space-y-8">
+            <section className="space-y-3 rounded-xl border border-border p-4">
+              <h3 className="font-medium text-foreground">GitHub clone token (SAST / SCA)</h3>
+              <p className="text-xs text-muted-foreground">
+                Encrypted PAT used to clone private GitHub repos during full scans (e.g.{" "}
+                <code className="text-[11px]">gravitee-ops-analytics</code>). Needs{" "}
+                Contents: Read. Optional{" "}
+                <code className="text-[11px]">GITHUB_TOKEN</code> in server <code className="text-[11px]">.env</code>{" "}
+                still overrides this when set.
+              </p>
+              <div>
+                <Label className="text-sm">Personal access token</Label>
+                <Input
+                  type="password"
+                  value={cloneToken}
+                  onChange={(e) => setCloneToken(e.target.value)}
+                  placeholder={cloneTokenConfigured ? "Saved — leave blank to keep" : "ghp_… or github_pat_…"}
+                  autoComplete="off"
+                />
+                {cloneTokenConfigured && (
+                  <p className="text-xs text-emerald-500/90 mt-1">A clone token is already saved.</p>
+                )}
+              </div>
+            </section>
+
             <section className="space-y-3 rounded-xl border border-border p-4">
               <div className="flex items-center justify-between">
                 <h3 className="font-medium text-foreground">Jira</h3>
