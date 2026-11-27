@@ -8,8 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Shared Git clone for SAST/SCA/secrets**: Full-mode repo scans clone once and reuse the workspace for Semgrep, lockfile discovery, Trivy/OSV SCA, and Gitleaks. Targets support optional `repoBranch`, `repoRef`, and `repoSubpath`; set `GITHUB_TOKEN` for private GitHub clones.
+- **n8n operations alerts**: Critical/high findings and failed scans can post to an n8n webhook (`N8N_WEBHOOK_URL` + `N8N_WEBHOOK_TOKEN`) for ops-channel notifications.
+- **Finding confirmation pipeline**: Focused retests against parent findings, multi-tool corroboration/confidence upgrades, hybrid OpenAPI+discovery inventory, schema-driven GraphQL probes, and out-of-band (Interactsh) blind XSS/SQLi checks.
+- **Scan quality / waivers**: Baseline-verified injection probes, OpenAPI POST/path probes, cross-tool CWE+URL dedupe, structured Nuclei/ZAP/Wapiti evidence, auth cookies forwarded to external scanners, and waiver-aware scoring for CI gates.
 - **SAST (Static Application Security Testing) via Semgrep**: Targets can now include a Git repository URL. During full-mode scans, the SAST module clones the repository, runs Semgrep with 1000+ community security rules, and produces findings with exact source file paths, line numbers, and code snippets. Supports JavaScript/TypeScript, Python, Java, Go, Ruby, PHP, C#, Kotlin, Rust, and more.
-- **Source code location on findings**: New `sourceFile`, `sourceLine`, and `sourceSnippet` fields on findings. SAST results link directly to the vulnerable code with surrounding context and `>>>` markers on affected lines.
+- **Source code location on findings**: New `sourceFile`, `sourceLine`, and `sourceSnippet` fields on findings. SAST results link directly to the vulnerable code with surrounding context and `>>>` markers on affected lines. SARIF export includes source-file keys when present.
 - **Repository URL on targets**: New optional `repoUrl` field on the Targets table and UI. Enables SAST when a Git URL is provided; leave blank to skip source code analysis.
 - **Ghoststrike Overview document**: Comprehensive `docs/GHOSTSTRIKE_OVERVIEW.md` covering all DAST and SAST capabilities, authenticated scanning, reporting, architecture, and getting started guide — suitable for sharing with teams and stakeholders.
 - **10 new scan tools**: AI prompt injection (PEN-27), secret/credential exposure (PEN-33), URL normalisation bypass (PEN-42), insecure HTTP client config (PEN-52), JWT security, cookie security flags, HTTP request smuggling, CRLF injection, open redirect, prototype pollution. Full-mode scans now run 28 built-in tools.
@@ -19,6 +23,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Inventory-fed DAST**: OpenAPI inventory merges with discovery; Nuclei/external scanners receive inventory paths; auth-role gates tighten multi-role escalation checks.
+- **CI defaults**: Full-mode CI scans default to richer tool sets aligned with repo scanning (SAST/SCA/secrets) when configured.
 - **False positive reduction — debug endpoints**: Debug/diagnostic endpoint checks (`/debug`, `/actuator`, `/metrics`, etc.) now compare responses against the SPA baseline. SPA fallback responses (same HTML shell as `/`) are suppressed instead of reported as medium-severity findings.
 - **False positive reduction — Nikto legacy CGI**: Legacy CGI/ASP/IIS/FrontPage probes (cart32.exe, classified.cgi, _vti_bin, etc.) are grouped into a single informational summary instead of individual medium-severity findings.
 - **False positive reduction — sensitive file detection**: `hasFileSpecificContent()` expanded to cover `.git/HEAD`, `.sql` dumps, `.json`/`.yml` configs, `.htaccess`, `.npmrc`, `docker-compose`, `web.config` — validates actual file content vs SPA HTML shell.
