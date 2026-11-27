@@ -59,7 +59,14 @@ export default function Scans() {
                 >
                   <div className="pr-4 text-sm font-mono text-muted-foreground">#{scan.id}</div>
                   <div className="min-w-0">
-                    <div className="text-sm font-medium text-foreground">Target #{scan.targetId}</div>
+                    <div className="text-sm font-medium text-foreground truncate">
+                      {scan.targetName || `Target #${scan.targetId}`}
+                    </div>
+                    {scan.targetUrl ? (
+                      <div className="text-xs text-primary/80 truncate" title={scan.targetUrl}>
+                        {scan.targetUrl}
+                      </div>
+                    ) : null}
                     <div className="text-xs text-muted-foreground truncate">{scan.tools}</div>
                   </div>
                   <div className="px-4">

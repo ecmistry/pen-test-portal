@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, getTableColumns, gte, sql, type SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   InsertAuditEvent,
@@ -315,16 +315,27 @@ export async function deleteTarget(id: number) {
 }
 
 // ─── Scans ────────────────────────────────────────────────────────────────────
-export async function getScansByUser(userId: number, limit = 50) {
+async function selectScansWithTarget(where: SQL | undefined, limit: number) {
   const db = await getDb();
   if (!db) return [];
-  return db.select().from(scans).where(eq(scans.userId, userId)).orderBy(desc(scans.createdAt)).limit(limit);
+  const base = db
+    .select({
+      ...getTableColumns(scans),
+      targetName: targets.name,
+      targetUrl: targets.url,
+    })
+    .from(scans)
+    .leftJoin(targets, eq(scans.targetId, targets.id));
+  const filtered = where ? base.where(where) : base;
+  return filtered.orderBy(desc(scans.createdAt)).limit(limit);
+}
+
+export async function getScansByUser(userId: number, limit = 50) {
+  return selectScansWithTarget(eq(scans.userId, userId), limit);
 }
 
 export async function getScansByTarget(targetId: number, limit = 50) {
-  const db = await getDb();
-  if (!db) return [];
-  return db.select().from(scans).where(eq(scans.targetId, targetId)).orderBy(desc(scans.createdAt)).limit(limit);
+  return selectScansWithTarget(eq(scans.targetId, targetId), limit);
 }
 
 export async function getPreviousCompletedScan(targetId: number, beforeScanId: number) {
@@ -346,9 +357,7 @@ export async function getPreviousCompletedScan(targetId: number, beforeScanId: n
 }
 
 export async function getAllScans(limit = 100) {
-  const db = await getDb();
-  if (!db) return [];
-  return db.select().from(scans).orderBy(desc(scans.createdAt)).limit(limit);
+  return selectScansWithTarget(undefined, limit);
 }
 
 export async function getScanById(id: number) {
@@ -797,9 +806,7 @@ export async function getTargetsByOrg(orgId: number) {
 }
 
 export async function getScansByOrg(orgId: number, limit = 50) {
-  const db = await getDb();
-  if (!db) return [];
-  return db.select().from(scans).where(eq(scans.orgId, orgId)).orderBy(desc(scans.createdAt)).limit(limit);
+  return selectScansWithTarget(eq(scans.orgId, orgId), limit);
 }
 
 export async function getTargetByUrlAndOrg(url: string, orgId: number) {
