@@ -367,6 +367,49 @@ function assertCanWrite(ctxUser: { role: string; orgRole?: string | null }) {
   }
 }
 
+/**
+ * CI/CD key access to an existing scan.
+ * - Org-bound key: scan must belong to that org
+ * - User-bound DB key: scan must be owned by that user
+ * - Legacy env CICD_API_KEY (userId 0, no org): only scans created as system (userId 0) — no cross-tenant IDOR
+ */
+export function assertCicdCanAccessScan(
+  auth: { userId: number; orgId: number | null },
+  scan: { userId: number; orgId?: number | null }
+) {
+  if (auth.orgId != null) {
+    if (scan.orgId === auth.orgId) return;
+    throw new TRPCError({ code: "FORBIDDEN", message: "Scan not in API key organization" });
+  }
+  if (auth.userId > 0) {
+    if (scan.userId === auth.userId) return;
+    throw new TRPCError({ code: "FORBIDDEN", message: "Scan access denied" });
+  }
+  // Legacy env master key
+  if (scan.userId === 0) return;
+  throw new TRPCError({
+    code: "FORBIDDEN",
+    message: "Legacy CICD_API_KEY cannot access user-owned scans; use an org-bound CI key",
+  });
+}
+
+/** Legacy env CI key must not free-form-scan arbitrary URLs (scanner abuse). */
+function assertCicdScanTargetAllowed(
+  auth: { userId: number; orgId: number | null },
+  input: { targetId?: number; targetUrl?: string; environment?: string }
+) {
+  const isLegacyEnvKey = auth.userId === 0 && auth.orgId == null;
+  if (!isLegacyEnvKey) return;
+  if (input.targetId || input.environment) return;
+  if (input.targetUrl) {
+    throw new TRPCError({
+      code: "BAD_REQUEST",
+      message:
+        "Legacy CICD_API_KEY cannot use free-form targetUrl. Pass targetId (or environment with an org-bound key), or create an Integrations → CI/CD API key.",
+    });
+  }
+}
+
 function assertOrgAdmin(ctxUser: { role: string; orgRole?: string | null }) {
   if (ctxUser.role === "admin") return;
   if (ctxUser.orgRole === "org_admin") return;
@@ -572,6 +615,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         const target = await getTargetById(input.targetId);
         if (!target) throw new TRPCError({ code: "NOT_FOUND", message: "Target not found" });
         assertOwnerOrAdmin(target.userId, ctx.user);
@@ -902,6 +946,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         const target = await getTargetById(input.targetId);
         if (!target) throw new TRPCError({ code: "NOT_FOUND" });
         assertOwnerOrAdmin(target.userId, ctx.user);
@@ -930,6 +975,7 @@ export const appRouter = router({
         })
       )
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         const schedule = await getScheduleById(input.id);
         if (!schedule) throw new TRPCError({ code: "NOT_FOUND" });
         assertOwnerOrAdmin(schedule.userId, ctx.user);
@@ -943,6 +989,7 @@ export const appRouter = router({
     delete: protectedProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         const schedule = await getScheduleById(input.id);
         if (!schedule) throw new TRPCError({ code: "NOT_FOUND" });
         assertOwnerOrAdmin(schedule.userId, ctx.user);
@@ -986,6 +1033,7 @@ export const appRouter = router({
     save: protectedProcedure
       .input(z.object({ config: integrationsConfigSchema }))
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         if (input.config.jira?.enabled) await assertSafeUrlInput(input.config.jira.baseUrl, ["https:"]);
         for (const wh of input.config.webhooks || []) {
           await assertSafeUrlInput(wh.url, ["https:"]);
@@ -1038,6 +1086,7 @@ export const appRouter = router({
       }),
 
     delete: protectedProcedure.mutation(async ({ ctx }) => {
+      assertCanWrite(ctx.user);
       await deleteIntegration(ctx.user.id);
       return { success: true };
     }),
@@ -1060,6 +1109,7 @@ export const appRouter = router({
         findingId: z.number().optional(),
       }))
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
         if (!orgId) throw new TRPCError({ code: "BAD_REQUEST", message: "No organization" });
         let title = input.title;
@@ -1103,6 +1153,7 @@ export const appRouter = router({
     delete: protectedProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         const orgId = ctx.user.orgId ?? (await ensureUserOrg(ctx.user.id));
         if (!orgId) throw new TRPCError({ code: "BAD_REQUEST", message: "No organization" });
         await deleteFindingWaiver(input.id, orgId);
@@ -1178,6 +1229,7 @@ export const appRouter = router({
     createKey: protectedProcedure
       .input(z.object({ name: z.string().min(1).max(255).default("CI key") }))
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         const orgId = await ensureUserOrg(ctx.user.id);
         const created = await createCicdApiKey(ctx.user.id, input.name, orgId);
         return { ...created, note: "Copy this API key now — it will not be shown again." };
@@ -1190,6 +1242,7 @@ export const appRouter = router({
     revokeKey: protectedProcedure
       .input(z.object({ id: z.number() }))
       .mutation(async ({ ctx, input }) => {
+        assertCanWrite(ctx.user);
         const ok = await revokeCicdApiKey(input.id, ctx.user.id, ctx.user.role === "admin");
         if (!ok) throw new TRPCError({ code: "NOT_FOUND" });
         return { success: true };
@@ -1220,6 +1273,7 @@ export const appRouter = router({
       .mutation(async ({ input }) => {
         const auth = await validateCicdApiKey(input.apiKey);
         if (!auth.ok) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid CI/CD API key" });
+        assertCicdScanTargetAllowed(auth, input);
         incCounter("ghoststrike_cicd_scans_total");
 
         let target = input.targetId ? await getTargetById(input.targetId) : undefined;
@@ -1230,6 +1284,10 @@ export const appRouter = router({
           }
           if (auth.userId !== 0 && !auth.orgId && target.userId !== auth.userId) {
             throw new TRPCError({ code: "FORBIDDEN", message: "Target access denied" });
+          }
+          // Legacy env key may only scan registered targets it was given by id
+          if (auth.userId === 0 && auth.orgId == null && !input.targetId && !input.environment) {
+            throw new TRPCError({ code: "FORBIDDEN", message: "Target access denied for legacy CI key" });
           }
         }
 
@@ -1248,7 +1306,7 @@ export const appRouter = router({
           target = await getTargetByUrlAndOrg(targetUrl, auth.orgId);
         }
 
-        // Apply org policy defaults
+        // Apply org policy defaults (org-bound keys only apply policies from their org)
         let tools = input.tools;
         let scanMode = input.scanMode;
         let failThreshold = input.failOnSeverity ?? input.failOn ?? "high";
@@ -1256,7 +1314,11 @@ export const appRouter = router({
         const policyId = input.policyId ?? target?.policyId ?? null;
         if (policyId) {
           const policy = await getScanPolicyById(policyId);
-          if (policy && (!auth.orgId || policy.orgId === auth.orgId || !auth.orgId)) {
+          const policyAllowed =
+            !!policy &&
+            ((auth.orgId != null && policy.orgId === auth.orgId) ||
+              (auth.orgId == null && auth.userId > 0 && target?.userId === auth.userId));
+          if (policy && policyAllowed) {
             if (!input.tools?.length || input.tools.join(",") === LIGHT_DEFAULT_TOOLS.join(",")) {
               tools = policy.tools.split(",").map((t) => t.trim()).filter(Boolean);
             }
@@ -1363,9 +1425,7 @@ export const appRouter = router({
         if (!auth.ok) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid CI/CD API key" });
         const scan = await getScanById(input.scanId);
         if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
-        if (auth.userId !== 0 && scan.userId !== auth.userId && auth.userId !== 0) {
-          if (scan.userId !== auth.userId) throw new TRPCError({ code: "FORBIDDEN" });
-        }
+        assertCicdCanAccessScan(auth, scan);
         if (scan.status !== "completed" && scan.status !== "failed") {
           return {
             scanId: scan.id,
@@ -1398,9 +1458,7 @@ export const appRouter = router({
         if (!auth.ok) throw new TRPCError({ code: "UNAUTHORIZED", message: "Invalid CI/CD API key" });
         const scan = await getScanById(input.scanId);
         if (!scan) throw new TRPCError({ code: "NOT_FOUND" });
-        if (auth.userId !== 0 && scan.userId !== auth.userId) {
-          throw new TRPCError({ code: "FORBIDDEN" });
-        }
+        assertCicdCanAccessScan(auth, scan);
         const target = await getTargetById(scan.targetId);
         if (!target && scan.targetId !== 0) throw new TRPCError({ code: "NOT_FOUND", message: "Target not found" });
         const findings = await getFindingsByScan(input.scanId);

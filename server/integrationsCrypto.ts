@@ -45,5 +45,11 @@ export function redactIntegrationsConfig(config: IntegrationsConfig): Integratio
   if (clone.repoScan?.githubToken) {
     clone.repoScan = { ...clone.repoScan, githubToken: "********" };
   }
+  if (clone.webhooks?.length) {
+    clone.webhooks = clone.webhooks.map((w) => ({
+      ...w,
+      secret: w.secret ? "********" : w.secret,
+    }));
+  }
   return clone;
 }

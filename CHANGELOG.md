@@ -38,6 +38,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- **Portal hardening (authz)**: Legacy `CICD_API_KEY` can no longer read arbitrary scans/SARIF (IDOR); free-form `targetUrl` blocked for that key; org viewer/auditor write paths gated (`scans.start`, schedules, integrations, waivers, CI keys); webhook signing secrets redacted on `integrations.get`; CI policies only apply within the key’s org.
 - **Report generation 500 error**: Upgraded `markdownContent`, `executiveSummary`, and `complianceNotes` columns from MySQL `TEXT` (64KB) to `MEDIUMTEXT` (16MB). Reports with 24+ scan tools were exceeding the column size limit.
 
 ---

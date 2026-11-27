@@ -170,6 +170,7 @@ Track these so they are not forgotten after a “green” HTTP check.
 | **Nginx proxy timeouts** | Medium (UX) | Long scans can 504 if nginx timeouts are short. | Confirm `proxy_read_timeout` ≥ 300s in live nginx conf (`deploy/nginx-ghoststrike.conf`). |
 | **Single-host deploy** | High (availability) | One EC2, no blue/green. Restart = brief blip. | Accept for now; consider second instance / ALB later. |
 | **Secrets in `.env` on host** | High (ops) | Production secrets live in `/home/ec2-user/pen-test-portal/.env`. | Keep permissions tight; never commit; prefer SSM/Secrets Manager long-term. |
+| **Legacy `CICD_API_KEY`** | Medium (ops) | Env master CI key is limited (no free-form URLs; no cross-user scan IDOR). Prefer **Integrations → CI/CD API keys** (org-bound). | Avoid setting `CICD_API_KEY` in production when possible. |
 
 ---
 

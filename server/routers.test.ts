@@ -203,6 +203,51 @@ describe("scans.start", () => {
     expect(result.scanId).toBe(101);
     expect(result.success).toBe(true);
   });
+
+  it("forbids org viewer from starting scans", async () => {
+    const viewer = { ...mockUser, orgRole: "viewer" as const, orgId: 1 };
+    const ctx = createContext(viewer as any);
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.scans.start({ targetId: 10, tools: ["headers"], scanMode: "light" })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+});
+
+describe("cicd.status access control", () => {
+  it("forbids legacy env key from reading another user's scan", async () => {
+    vi.mocked(db.validateCicdApiKey).mockResolvedValueOnce({ ok: true, userId: 0, orgId: null });
+    vi.mocked(db.getScanById).mockResolvedValueOnce({ ...mockScan, userId: 99, orgId: 1 } as any);
+    const ctx = createContext(null as any);
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.cicd.status({ scanId: 100, apiKey: "env-master-key" })
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+  });
+
+  it("allows legacy env key for system-owned scan", async () => {
+    vi.mocked(db.validateCicdApiKey).mockResolvedValueOnce({ ok: true, userId: 0, orgId: null });
+    vi.mocked(db.getScanById).mockResolvedValueOnce({
+      ...mockScan,
+      userId: 0,
+      orgId: null,
+      status: "running",
+    } as any);
+    const ctx = createContext(null as any);
+    const caller = appRouter.createCaller(ctx);
+    const result = await caller.cicd.status({ scanId: 100, apiKey: "env-master-key" });
+    expect(result.status).toBe("running");
+    expect(result.passed).toBeNull();
+  });
+
+  it("rejects free-form targetUrl for legacy env key", async () => {
+    vi.mocked(db.validateCicdApiKey).mockResolvedValueOnce({ ok: true, userId: 0, orgId: null });
+    const ctx = createContext(null as any);
+    const caller = appRouter.createCaller(ctx);
+    await expect(
+      caller.cicd.scan({ targetUrl: "https://evil.example", apiKey: "env-master-key", tools: ["headers"] })
+    ).rejects.toMatchObject({ code: "BAD_REQUEST" });
+  });
 });
 
 describe("scans.list", () => {
