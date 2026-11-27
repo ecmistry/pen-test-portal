@@ -639,7 +639,7 @@ export default function ScanDetail() {
                   <div className="flex items-center gap-3 mb-2">
                     <span className="text-xs font-mono text-muted-foreground">{s.id}</span>
                     <span className="text-sm font-medium text-foreground">{s.title}</span>
-                    <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${s.impact === "High" ? "text-red-300 bg-red-950/40" : s.impact === "Medium" ? "text-yellow-300 bg-yellow-950/40" : "text-blue-300 bg-blue-950/40"}`}>
+                    <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${s.impact === "Critical" || s.impact === "High" ? "text-red-300 bg-red-950/40" : s.impact === "Medium" ? "text-yellow-300 bg-yellow-950/40" : "text-blue-300 bg-blue-950/40"}`}>
                       {s.impact} Impact
                     </span>
                     <span className={`text-xs px-1.5 py-0.5 rounded ${s.likelihood === "High" ? "text-red-300 bg-red-950/30" : s.likelihood === "Medium" ? "text-yellow-300 bg-yellow-950/30" : "text-blue-300 bg-blue-950/30"}`}>

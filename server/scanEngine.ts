@@ -2602,7 +2602,7 @@ export interface AttackScenario {
   objective: string;
   steps: { findingTitle: string; role: string }[];
   likelihood: "High" | "Medium" | "Low";
-  impact: "High" | "Medium" | "Low";
+  impact: "Critical" | "High" | "Medium" | "Low";
 }
 
 interface ScenarioTemplate {
@@ -2611,7 +2611,7 @@ interface ScenarioTemplate {
   objective: string;
   requiredCategories: string[][];
   likelihood: "High" | "Medium" | "Low";
-  impact: "High" | "Medium" | "Low";
+  impact: "Critical" | "High" | "Medium" | "Low";
   stepRoles: string[];
 }
 
