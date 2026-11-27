@@ -27,13 +27,32 @@ describe("withGithubToken", () => {
 describe("resolveGithubCloneToken", () => {
   it("prefers explicit token over env", async () => {
     const prev = process.env.GITHUB_TOKEN;
+    const prevClassic = process.env.GITHUB_CLASSIC_TOKEN;
     process.env.GITHUB_TOKEN = "env-tok";
+    delete process.env.GITHUB_CLASSIC_TOKEN;
     try {
       expect(await resolveGithubCloneToken({ token: "ui-tok" })).toBe("ui-tok");
       expect(await resolveGithubCloneToken({})).toBe("env-tok");
     } finally {
       if (prev === undefined) delete process.env.GITHUB_TOKEN;
       else process.env.GITHUB_TOKEN = prev;
+      if (prevClassic === undefined) delete process.env.GITHUB_CLASSIC_TOKEN;
+      else process.env.GITHUB_CLASSIC_TOKEN = prevClassic;
+    }
+  });
+
+  it("falls back to GITHUB_CLASSIC_TOKEN", async () => {
+    const prev = process.env.GITHUB_TOKEN;
+    const prevClassic = process.env.GITHUB_CLASSIC_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    process.env.GITHUB_CLASSIC_TOKEN = "classic-tok";
+    try {
+      expect(await resolveGithubCloneToken({})).toBe("classic-tok");
+    } finally {
+      if (prev === undefined) delete process.env.GITHUB_TOKEN;
+      else process.env.GITHUB_TOKEN = prev;
+      if (prevClassic === undefined) delete process.env.GITHUB_CLASSIC_TOKEN;
+      else process.env.GITHUB_CLASSIC_TOKEN = prevClassic;
     }
   });
 });

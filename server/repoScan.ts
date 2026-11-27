@@ -43,9 +43,17 @@ export type RepoCloneResult = {
   repoUrl: string;
 };
 
-/** Build authenticated HTTPS clone URL when GITHUB_TOKEN is set (github.com only). */
+/** Env tokens used for private GitHub clones (classic PAT alias supported). */
+export function envGithubCloneToken(): string {
+  return (
+    (process.env.GITHUB_TOKEN || "").trim() ||
+    (process.env.GITHUB_CLASSIC_TOKEN || "").trim()
+  );
+}
+
+/** Build authenticated HTTPS clone URL when a GitHub token is set (github.com only). */
 export function withGithubToken(repoUrl: string, token?: string): string {
-  const t = (token || process.env.GITHUB_TOKEN || "").trim();
+  const t = (token || envGithubCloneToken()).trim();
   if (!t) return repoUrl;
   try {
     const u = new URL(repoUrl);
@@ -60,7 +68,7 @@ export function withGithubToken(repoUrl: string, token?: string): string {
 }
 
 /**
- * Resolve clone token: explicit arg → GITHUB_TOKEN env → Integrations → UI (repoScan.githubToken).
+ * Resolve clone token: explicit arg → GITHUB_TOKEN / GITHUB_CLASSIC_TOKEN → Integrations UI.
  */
 export async function resolveGithubCloneToken(opts?: {
   token?: string | null;
@@ -69,7 +77,7 @@ export async function resolveGithubCloneToken(opts?: {
 }): Promise<string> {
   const explicit = (opts?.token || "").trim();
   if (explicit) return explicit;
-  const env = (process.env.GITHUB_TOKEN || "").trim();
+  const env = envGithubCloneToken();
   if (env) return env;
   if (!opts?.userId && !opts?.orgId) return "";
   try {

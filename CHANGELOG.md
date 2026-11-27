@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added
 
 - **GitHub clone token UI**: Integrations page can store an encrypted PAT for private-repo SAST/SCA/secrets clones (env `GITHUB_TOKEN` still overrides when set).
+- **GITHUB_CLASSIC_TOKEN env alias**: Scanner accepts a classic PAT via `GITHUB_CLASSIC_TOKEN` when `GITHUB_TOKEN` is unset (useful when fine-grained tokens lack org/repo access).
 - **Shared Git clone for SAST/SCA/secrets**: Full-mode repo scans clone once and reuse the workspace for Semgrep, lockfile discovery, Trivy/OSV SCA, and Gitleaks. Targets support optional `repoBranch`, `repoRef`, and `repoSubpath`; set `GITHUB_TOKEN` for private GitHub clones.
 - **n8n operations alerts**: Critical/high findings and failed scans can post to an n8n webhook (`N8N_WEBHOOK_URL` + `N8N_WEBHOOK_TOKEN`) for ops-channel notifications.
 - **Finding confirmation pipeline**: Focused retests against parent findings, multi-tool corroboration/confidence upgrades, hybrid OpenAPI+discovery inventory, schema-driven GraphQL probes, and out-of-band (Interactsh) blind XSS/SQLi checks.

@@ -18,6 +18,6 @@ export const ENV = {
   /** n8n operations-security-alerts webhook */
   n8nWebhookUrl: process.env.N8N_WEBHOOK_URL ?? "",
   n8nWebhookToken: process.env.N8N_WEBHOOK_TOKEN ?? "",
-  /** GitHub PAT for private repo clones */
-  githubToken: process.env.GITHUB_TOKEN ?? "",
+  /** GitHub PAT for private repo clones (classic alias supported) */
+  githubToken: process.env.GITHUB_TOKEN || process.env.GITHUB_CLASSIC_TOKEN || "",
 };
